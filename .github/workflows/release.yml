@@ -22,16 +22,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.9
-            3.10
-            3.11
-            3.12
+          python-version: '3.12'
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i python3.9 -i python3.10 -i python3.11 -i python3.12
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
@@ -62,7 +58,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}-apple-darwin
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i python3.9 -i python3.10 -i python3.11 -i python3.12
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -84,7 +80,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i python3.9 -i python3.10 -i python3.11 -i python3.12
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
