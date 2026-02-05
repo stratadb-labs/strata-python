@@ -182,6 +182,8 @@ if new_version is None:
 | `vector_get(collection, key)` | Get vector |
 | `vector_delete(collection, key)` | Delete vector |
 | `vector_search(collection, query, k)` | Search |
+| `vector_collection_stats(collection)` | Get collection statistics |
+| `vector_batch_upsert(collection, vectors)` | Batch insert/update vectors |
 
 ### Branches
 
@@ -193,6 +195,8 @@ if new_version is None:
 | `fork_branch(dest)` | Fork with data copy |
 | `list_branches()` | List all branches |
 | `delete_branch(name)` | Delete branch |
+| `branch_exists(name)` | Check if branch exists |
+| `branch_get(name)` | Get branch metadata |
 | `diff_branches(a, b)` | Compare branches |
 | `merge_branches(source, strategy)` | Merge into current |
 
@@ -204,6 +208,7 @@ if new_version is None:
 | `set_space(name)` | Switch space |
 | `list_spaces()` | List spaces |
 | `delete_space(name)` | Delete space |
+| `delete_space_force(name)` | Force delete space |
 
 ### Database
 
@@ -213,6 +218,14 @@ if new_version is None:
 | `info()` | Get database info |
 | `flush()` | Flush to disk |
 | `compact()` | Trigger compaction |
+
+### Bundle Operations
+
+| Method | Description |
+|--------|-------------|
+| `branch_export(branch, path)` | Export branch to bundle file |
+| `branch_import(path)` | Import branch from bundle file |
+| `branch_validate_bundle(path)` | Validate bundle file |
 
 ## Development
 

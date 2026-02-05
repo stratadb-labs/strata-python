@@ -9,8 +9,9 @@ use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 
 use ::stratadb::{
+    BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
     CollectionInfo, DistanceMetric, Error as StrataError, MergeStrategy,
-    Strata as RustStrata, Value, VersionedValue,
+    Strata as RustStrata, Value, VersionedBranchInfo, VersionedValue,
 };
 
 /// Convert a Python object to a stratadb Value.
@@ -400,6 +401,52 @@ impl PyStrata {
         Ok(list.unbind().into_any())
     }
 
+    /// Get statistics for a single collection.
+    fn vector_collection_stats(&self, py: Python<'_>, collection: &str) -> PyResult<PyObject> {
+        let info = self
+            .inner
+            .vector_collection_stats(collection)
+            .map_err(to_py_err)?;
+        Ok(collection_info_to_py(py, info))
+    }
+
+    /// Batch insert/update multiple vectors.
+    ///
+    /// Each vector should be a dict with 'key', 'vector', and optional 'metadata'.
+    fn vector_batch_upsert(
+        &self,
+        collection: &str,
+        vectors: &Bound<'_, PyList>,
+    ) -> PyResult<Vec<u64>> {
+        let batch: Vec<BatchVectorEntry> = vectors
+            .iter()
+            .map(|item| {
+                let dict = item.downcast::<PyDict>()?;
+                let key: String = dict
+                    .get_item("key")?
+                    .ok_or_else(|| PyValueError::new_err("missing 'key'"))?
+                    .extract()?;
+                let vec = extract_vector(
+                    &dict
+                        .get_item("vector")?
+                        .ok_or_else(|| PyValueError::new_err("missing 'vector'"))?,
+                )?;
+                let meta = dict
+                    .get_item("metadata")?
+                    .map(|m| py_to_value(&m))
+                    .transpose()?;
+                Ok(BatchVectorEntry {
+                    key,
+                    vector: vec,
+                    metadata: meta,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        self.inner
+            .vector_batch_upsert(collection, batch)
+            .map_err(to_py_err)
+    }
+
     // =========================================================================
     // Branch Management
     // =========================================================================
@@ -437,6 +484,22 @@ impl PyStrata {
     /// Delete a branch.
     fn delete_branch(&self, branch: &str) -> PyResult<()> {
         self.inner.delete_branch(branch).map_err(to_py_err)
+    }
+
+    /// Check if a branch exists.
+    fn branch_exists(&self, name: &str) -> PyResult<bool> {
+        self.inner.branches().exists(name).map_err(to_py_err)
+    }
+
+    /// Get branch metadata with version info.
+    ///
+    /// Returns a dict with 'id', 'status', 'created_at', 'updated_at', 'version', 'timestamp',
+    /// or None if the branch does not exist.
+    fn branch_get(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+        match self.inner.branch_get(name).map_err(to_py_err)? {
+            Some(info) => Ok(versioned_branch_info_to_py(py, info)),
+            None => Ok(py.None()),
+        }
     }
 
     /// Compare two branches.
@@ -513,6 +576,11 @@ impl PyStrata {
         self.inner.delete_space(space).map_err(to_py_err)
     }
 
+    /// Force delete a space even if non-empty.
+    fn delete_space_force(&self, space: &str) -> PyResult<()> {
+        self.inner.delete_space_force(space).map_err(to_py_err)
+    }
+
     // =========================================================================
     // Database Operations
     // =========================================================================
@@ -542,6 +610,37 @@ impl PyStrata {
     fn compact(&self) -> PyResult<()> {
         self.inner.compact().map_err(to_py_err)
     }
+
+    // =========================================================================
+    // Bundle Operations
+    // =========================================================================
+
+    /// Export a branch to a bundle file.
+    ///
+    /// Returns a dict with 'branch_id', 'path', 'entry_count', 'bundle_size'.
+    fn branch_export(&self, py: Python<'_>, branch: &str, path: &str) -> PyResult<PyObject> {
+        let result = self.inner.branch_export(branch, path).map_err(to_py_err)?;
+        Ok(branch_export_result_to_py(py, result))
+    }
+
+    /// Import a branch from a bundle file.
+    ///
+    /// Returns a dict with 'branch_id', 'transactions_applied', 'keys_written'.
+    fn branch_import(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
+        let result = self.inner.branch_import(path).map_err(to_py_err)?;
+        Ok(branch_import_result_to_py(py, result))
+    }
+
+    /// Validate a bundle file without importing.
+    ///
+    /// Returns a dict with 'branch_id', 'format_version', 'entry_count', 'checksums_valid'.
+    fn branch_validate_bundle(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
+        let result = self
+            .inner
+            .branch_validate_bundle(path)
+            .map_err(to_py_err)?;
+        Ok(bundle_validate_result_to_py(py, result))
+    }
 }
 
 /// Extract a vector from either a numpy array or a Python list.
@@ -570,6 +669,52 @@ fn collection_info_to_py(py: Python<'_>, c: CollectionInfo) -> PyObject {
     dict.set_item("count", c.count).unwrap();
     dict.set_item("index_type", c.index_type).unwrap();
     dict.set_item("memory_bytes", c.memory_bytes).unwrap();
+    dict.unbind().into_any()
+}
+
+/// Convert VersionedBranchInfo to Python dict.
+fn versioned_branch_info_to_py(py: Python<'_>, info: VersionedBranchInfo) -> PyObject {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("id", info.info.id.as_str()).unwrap();
+    dict.set_item("status", format!("{:?}", info.info.status).to_lowercase())
+        .unwrap();
+    dict.set_item("created_at", info.info.created_at).unwrap();
+    dict.set_item("updated_at", info.info.updated_at).unwrap();
+    if let Some(parent) = info.info.parent_id {
+        dict.set_item("parent_id", parent.as_str()).unwrap();
+    }
+    dict.set_item("version", info.version).unwrap();
+    dict.set_item("timestamp", info.timestamp).unwrap();
+    dict.unbind().into_any()
+}
+
+/// Convert BranchExportResult to Python dict.
+fn branch_export_result_to_py(py: Python<'_>, r: BranchExportResult) -> PyObject {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("branch_id", r.branch_id).unwrap();
+    dict.set_item("path", r.path).unwrap();
+    dict.set_item("entry_count", r.entry_count).unwrap();
+    dict.set_item("bundle_size", r.bundle_size).unwrap();
+    dict.unbind().into_any()
+}
+
+/// Convert BranchImportResult to Python dict.
+fn branch_import_result_to_py(py: Python<'_>, r: BranchImportResult) -> PyObject {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("branch_id", r.branch_id).unwrap();
+    dict.set_item("transactions_applied", r.transactions_applied)
+        .unwrap();
+    dict.set_item("keys_written", r.keys_written).unwrap();
+    dict.unbind().into_any()
+}
+
+/// Convert BundleValidateResult to Python dict.
+fn bundle_validate_result_to_py(py: Python<'_>, r: BundleValidateResult) -> PyObject {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("branch_id", r.branch_id).unwrap();
+    dict.set_item("format_version", r.format_version).unwrap();
+    dict.set_item("entry_count", r.entry_count).unwrap();
+    dict.set_item("checksums_valid", r.checksums_valid).unwrap();
     dict.unbind().into_any()
 }
 
