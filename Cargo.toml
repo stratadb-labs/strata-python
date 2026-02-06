@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 
-# Use git dependency during development, switch to crates.io version on release
+# Use git dependency for development, switch to crates.io version on release
 stratadb = { git = "https://github.com/stratadb-labs/strata-core", branch = "main" }
 # stratadb = "0.5"  # Uncomment when published to crates.io
 

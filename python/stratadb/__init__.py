@@ -21,9 +21,82 @@ Example usage:
     db.vector_create_collection("docs", 384)
     db.vector_upsert("docs", "doc-1", embedding)
     results = db.vector_search("docs", embedding, k=5)
+
+    # Transactions
+    with db.transaction():
+        db.kv_put("a", 1)
+        db.kv_put("b", 2)
+    # Auto-commits on success, auto-rollbacks on exception
 """
 
-from ._stratadb import Strata
+from ._stratadb import Strata as _Strata
 
-__all__ = ["Strata"]
+
+class Transaction:
+    """Context manager for database transactions.
+
+    Automatically commits on success and rolls back on exception.
+
+    Usage:
+        with db.transaction() as txn:
+            db.kv_put("key1", "value1")
+            db.kv_put("key2", "value2")
+        # Auto-commit on exit
+
+        with db.transaction(read_only=True):
+            value = db.kv_get("key1")
+        # Read-only transaction
+    """
+
+    def __init__(self, db: "_Strata", read_only: bool = False):
+        self._db = db
+        self._read_only = read_only
+
+    def __enter__(self) -> "Transaction":
+        self._db.begin(self._read_only)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if exc_type is None:
+            # Success - commit
+            self._db.commit()
+        else:
+            # Exception - rollback
+            self._db.rollback()
+        return False  # Don't suppress exceptions
+
+
+class Strata(_Strata):
+    """StrataDB database handle with transaction support.
+
+    This extends the native Strata class with a Pythonic transaction()
+    context manager.
+    """
+
+    def transaction(self, read_only: bool = False) -> Transaction:
+        """Start a transaction as a context manager.
+
+        Usage:
+            with db.transaction() as txn:
+                db.kv_put("key1", "value1")
+                db.kv_put("key2", "value2")
+            # Auto-commit on exit
+
+            with db.transaction(read_only=True):
+                value = db.kv_get("key1")
+            # Read-only transaction
+
+        Args:
+            read_only: If True, creates a read-only transaction.
+
+        Returns:
+            A Transaction context manager.
+
+        Raises:
+            RuntimeError: If a transaction is already active.
+        """
+        return Transaction(self, read_only)
+
+
+__all__ = ["Strata", "Transaction"]
 __version__ = "0.6.0"

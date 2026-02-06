@@ -6,12 +6,14 @@ use numpy::{PyArray1, PyArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::stratadb::{
     BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
-    CollectionInfo, DistanceMetric, Error as StrataError, MergeStrategy,
-    Strata as RustStrata, Value, VersionedBranchInfo, VersionedValue,
+    CollectionInfo, Command, DistanceMetric, Error as StrataError, FilterOp, MergeStrategy,
+    MetadataFilter, Output, Session, Strata as RustStrata, Value, VersionedBranchInfo,
+    VersionedValue,
 };
 
 /// Convert a Python object to a stratadb Value.
@@ -94,6 +96,8 @@ fn to_py_err(e: StrataError) -> PyErr {
 #[pyclass(name = "Strata")]
 pub struct PyStrata {
     inner: RustStrata,
+    /// Session for transaction support. Lazily initialized.
+    session: RefCell<Option<Session>>,
 }
 
 #[pymethods]
@@ -102,14 +106,20 @@ impl PyStrata {
     #[staticmethod]
     fn open(path: &str) -> PyResult<Self> {
         let inner = RustStrata::open(path).map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            session: RefCell::new(None),
+        })
     }
 
     /// Create an in-memory database (no persistence).
     #[staticmethod]
     fn cache() -> PyResult<Self> {
         let inner = RustStrata::cache().map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            session: RefCell::new(None),
+        })
     }
 
     // =========================================================================
@@ -136,6 +146,7 @@ impl PyStrata {
     }
 
     /// List keys with optional prefix filter.
+    #[pyo3(signature = (prefix=None))]
     fn kv_list(&self, prefix: Option<&str>) -> PyResult<Vec<String>> {
         self.inner.kv_list(prefix).map_err(to_py_err)
     }
@@ -179,6 +190,7 @@ impl PyStrata {
     }
 
     /// Compare-and-swap update based on version.
+    #[pyo3(signature = (cell, new_value, expected_version=None))]
     fn state_cas(
         &self,
         cell: &str,
@@ -274,6 +286,7 @@ impl PyStrata {
     }
 
     /// List JSON document keys.
+    #[pyo3(signature = (limit, prefix=None, cursor=None))]
     fn json_list(
         &self,
         py: Python<'_>,
@@ -298,6 +311,7 @@ impl PyStrata {
     // =========================================================================
 
     /// Create a vector collection.
+    #[pyo3(signature = (collection, dimension, metric=None))]
     fn vector_create_collection(
         &self,
         collection: &str,
@@ -334,6 +348,7 @@ impl PyStrata {
     }
 
     /// Insert or update a vector.
+    #[pyo3(signature = (collection, key, vector, metadata=None))]
     fn vector_upsert(
         &self,
         collection: &str,
@@ -525,6 +540,7 @@ impl PyStrata {
     }
 
     /// Merge a branch into the current branch.
+    #[pyo3(signature = (source, strategy=None))]
     fn merge_branches(
         &self,
         py: Python<'_>,
@@ -640,6 +656,331 @@ impl PyStrata {
             .branch_validate_bundle(path)
             .map_err(to_py_err)?;
         Ok(bundle_validate_result_to_py(py, result))
+    }
+
+    // =========================================================================
+    // Transaction Operations (NEW)
+    // =========================================================================
+
+    /// Begin a new transaction.
+    ///
+    /// All subsequent data operations will be part of this transaction until
+    /// commit() or rollback() is called.
+    #[pyo3(signature = (read_only=None))]
+    fn begin(&self, read_only: Option<bool>) -> PyResult<()> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            *session_ref = Some(self.inner.session());
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        let cmd = Command::TxnBegin {
+            branch: None,
+            options: Some(::stratadb::TxnOptions {
+                read_only: read_only.unwrap_or(false),
+            }),
+        };
+        session.execute(cmd).map_err(to_py_err)?;
+        Ok(())
+    }
+
+    /// Commit the current transaction.
+    ///
+    /// Returns the commit version number.
+    fn commit(&self) -> PyResult<u64> {
+        let mut session_ref = self.session.borrow_mut();
+        let session = session_ref
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transaction active"))?;
+
+        match session.execute(Command::TxnCommit).map_err(to_py_err)? {
+            Output::TxnCommitted { version } => Ok(version),
+            _ => Err(PyRuntimeError::new_err("Unexpected output for TxnCommit")),
+        }
+    }
+
+    /// Rollback the current transaction.
+    fn rollback(&self) -> PyResult<()> {
+        let mut session_ref = self.session.borrow_mut();
+        let session = session_ref
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transaction active"))?;
+
+        session.execute(Command::TxnRollback).map_err(to_py_err)?;
+        Ok(())
+    }
+
+    /// Get current transaction info.
+    ///
+    /// Returns a dict with 'id', 'status', 'started_at', or None if no transaction is active.
+    fn txn_info(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            return Ok(py.None());
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        match session.execute(Command::TxnInfo).map_err(to_py_err)? {
+            Output::TxnInfo(Some(info)) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("id", info.id)?;
+                dict.set_item("status", format!("{:?}", info.status).to_lowercase())?;
+                dict.set_item("started_at", info.started_at)?;
+                Ok(dict.unbind().into_any())
+            }
+            Output::TxnInfo(None) => Ok(py.None()),
+            _ => Err(PyRuntimeError::new_err("Unexpected output for TxnInfo")),
+        }
+    }
+
+    /// Check if a transaction is currently active.
+    fn txn_is_active(&self) -> PyResult<bool> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            return Ok(false);
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        match session.execute(Command::TxnIsActive).map_err(to_py_err)? {
+            Output::Bool(active) => Ok(active),
+            _ => Err(PyRuntimeError::new_err("Unexpected output for TxnIsActive")),
+        }
+    }
+
+    // =========================================================================
+    // Missing State Operations (NEW)
+    // =========================================================================
+
+    /// Delete a state cell.
+    ///
+    /// Returns True if the cell existed and was deleted, False otherwise.
+    fn state_delete(&self, cell: &str) -> PyResult<bool> {
+        self.inner.state_delete(cell).map_err(to_py_err)
+    }
+
+    /// List state cell names with optional prefix filter.
+    #[pyo3(signature = (prefix=None))]
+    fn state_list(&self, prefix: Option<&str>) -> PyResult<Vec<String>> {
+        self.inner.state_list(prefix).map_err(to_py_err)
+    }
+
+    // =========================================================================
+    // Versioned Getters (NEW)
+    // =========================================================================
+
+    /// Get a value by key with version info.
+    ///
+    /// Returns a dict with 'value', 'version', 'timestamp', or None if key doesn't exist.
+    fn kv_get_versioned(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        match self.inner.kv_getv(key).map_err(to_py_err)? {
+            Some(versions) if !versions.is_empty() => {
+                // Return the latest version
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(py.None()),
+        }
+    }
+
+    /// Get a state cell value with version info.
+    ///
+    /// Returns a dict with 'value', 'version', 'timestamp', or None if cell doesn't exist.
+    fn state_get_versioned(&self, py: Python<'_>, cell: &str) -> PyResult<PyObject> {
+        match self.inner.state_getv(cell).map_err(to_py_err)? {
+            Some(versions) if !versions.is_empty() => {
+                // Return the latest version
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(py.None()),
+        }
+    }
+
+    /// Get a JSON document value with version info.
+    ///
+    /// Returns a dict with 'value', 'version', 'timestamp', or None if key doesn't exist.
+    fn json_get_versioned(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        match self.inner.json_getv(key).map_err(to_py_err)? {
+            Some(versions) if !versions.is_empty() => {
+                // Return the latest version
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(py.None()),
+        }
+    }
+
+    // =========================================================================
+    // Pagination Improvements (NEW)
+    // =========================================================================
+
+    /// List keys with pagination support.
+    ///
+    /// Returns a dict with 'keys' and optionally 'cursor' for the next page.
+    #[pyo3(signature = (prefix=None, limit=None, cursor=None))]
+    fn kv_list_paginated(
+        &self,
+        py: Python<'_>,
+        prefix: Option<&str>,
+        limit: Option<u64>,
+        cursor: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let (keys, next_cursor) = self
+            .inner
+            .kv_list_paginated(prefix, cursor, limit)
+            .map_err(to_py_err)?;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("keys", keys)?;
+        if let Some(c) = next_cursor {
+            dict.set_item("cursor", c)?;
+        }
+        Ok(dict.unbind().into_any())
+    }
+
+    /// List events by type with pagination support.
+    ///
+    /// Returns a list of event dicts. Use `after` to paginate from a sequence number.
+    #[pyo3(signature = (event_type, limit=None, after=None))]
+    fn event_list_paginated(
+        &self,
+        py: Python<'_>,
+        event_type: &str,
+        limit: Option<u64>,
+        after: Option<u64>,
+    ) -> PyResult<PyObject> {
+        let events = self
+            .inner
+            .event_get_by_type_paginated(event_type, limit, after)
+            .map_err(to_py_err)?;
+        let list = PyList::empty_bound(py);
+        for vv in events {
+            list.append(versioned_to_py(py, vv))?;
+        }
+        Ok(list.unbind().into_any())
+    }
+
+    // =========================================================================
+    // Enhanced Vector Search (NEW)
+    // =========================================================================
+
+    /// Search for similar vectors with optional filter and metric override.
+    #[pyo3(signature = (collection, query, k, metric=None, filter=None))]
+    fn vector_search_filtered(
+        &self,
+        py: Python<'_>,
+        collection: &str,
+        query: &Bound<'_, PyAny>,
+        k: u64,
+        metric: Option<&str>,
+        filter: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<PyObject> {
+        let vec = extract_vector(query)?;
+
+        let metric_enum = match metric {
+            Some("cosine") => Some(DistanceMetric::Cosine),
+            Some("euclidean") => Some(DistanceMetric::Euclidean),
+            Some("dot_product") | Some("dotproduct") => Some(DistanceMetric::DotProduct),
+            Some(m) => return Err(PyValueError::new_err(format!("Invalid metric: {}", m))),
+            None => None,
+        };
+
+        let filter_vec = match filter {
+            Some(list) => {
+                let mut filters = Vec::new();
+                for item in list.iter() {
+                    let dict = item.downcast::<PyDict>()?;
+                    let field: String = dict
+                        .get_item("field")?
+                        .ok_or_else(|| PyValueError::new_err("filter missing 'field'"))?
+                        .extract()?;
+                    let op_str: String = dict
+                        .get_item("op")?
+                        .ok_or_else(|| PyValueError::new_err("filter missing 'op'"))?
+                        .extract()?;
+                    let op = match op_str.as_str() {
+                        "eq" => FilterOp::Eq,
+                        "ne" => FilterOp::Ne,
+                        "gt" => FilterOp::Gt,
+                        "gte" => FilterOp::Gte,
+                        "lt" => FilterOp::Lt,
+                        "lte" => FilterOp::Lte,
+                        "in" => FilterOp::In,
+                        "contains" => FilterOp::Contains,
+                        _ => return Err(PyValueError::new_err(format!("Invalid filter op: {}", op_str))),
+                    };
+                    let value_obj = dict
+                        .get_item("value")?
+                        .ok_or_else(|| PyValueError::new_err("filter missing 'value'"))?;
+                    let value = py_to_value(&value_obj)?;
+                    filters.push(MetadataFilter { field, op, value });
+                }
+                Some(filters)
+            }
+            None => None,
+        };
+
+        let matches = self
+            .inner
+            .vector_search_filtered(collection, vec, k, filter_vec, metric_enum)
+            .map_err(to_py_err)?;
+        let list = PyList::empty_bound(py);
+        for m in matches {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("key", m.key)?;
+            dict.set_item("score", m.score)?;
+            if let Some(meta) = m.metadata {
+                dict.set_item("metadata", value_to_py(py, meta))?;
+            }
+            list.append(dict)?;
+        }
+        Ok(list.unbind().into_any())
+    }
+
+    // =========================================================================
+    // Space Operations (NEW)
+    // =========================================================================
+
+    /// Create a new space explicitly.
+    ///
+    /// Spaces are auto-created on first write, but this allows pre-creation.
+    fn space_create(&self, space: &str) -> PyResult<()> {
+        self.inner.space_create(space).map_err(to_py_err)
+    }
+
+    /// Check if a space exists in the current branch.
+    fn space_exists(&self, space: &str) -> PyResult<bool> {
+        self.inner.space_exists(space).map_err(to_py_err)
+    }
+
+    // =========================================================================
+    // Search (NEW)
+    // =========================================================================
+
+    /// Search across multiple primitives for matching content.
+    ///
+    /// Returns a list of dicts with 'entity', 'primitive', 'score', 'rank', 'snippet'.
+    #[pyo3(signature = (query, k=None, primitives=None))]
+    fn search(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        k: Option<u64>,
+        primitives: Option<Vec<String>>,
+    ) -> PyResult<PyObject> {
+        let results = self
+            .inner
+            .search(query, k, primitives)
+            .map_err(to_py_err)?;
+        let list = PyList::empty_bound(py);
+        for hit in results {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("entity", hit.entity)?;
+            dict.set_item("primitive", hit.primitive)?;
+            dict.set_item("score", hit.score)?;
+            dict.set_item("rank", hit.rank)?;
+            if let Some(snippet) = hit.snippet {
+                dict.set_item("snippet", snippet)?;
+            }
+            list.append(dict)?;
+        }
+        Ok(list.unbind().into_any())
     }
 }
 
