@@ -31,6 +31,18 @@ Example usage:
 
 from ._stratadb import Strata as _Strata
 
+# Exception hierarchy
+from ._stratadb import (
+    StrataError,
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    StateError,
+    ConstraintError,
+    AccessDeniedError,
+    IoError,
+)
+
 
 class Transaction:
     """Context manager for database transactions.
@@ -114,10 +126,23 @@ class Strata(_Strata):
             A Transaction context manager.
 
         Raises:
-            RuntimeError: If a transaction is already active.
+            StateError: If a transaction is already active.
         """
         return Transaction(self, read_only)
 
 
-__all__ = ["Strata", "Transaction", "setup"]
+__all__ = [
+    "Strata",
+    "Transaction",
+    "setup",
+    # Exception hierarchy
+    "StrataError",
+    "NotFoundError",
+    "ValidationError",
+    "ConflictError",
+    "StateError",
+    "ConstraintError",
+    "AccessDeniedError",
+    "IoError",
+]
 __version__ = "0.6.0"

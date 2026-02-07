@@ -3,11 +3,11 @@
 //! This module exposes the StrataDB API to Python via PyO3.
 
 use numpy::{PyArray1, PyArrayMethods};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use ::stratadb::{
     AccessMode, BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
@@ -15,6 +15,19 @@ use ::stratadb::{
     MetadataFilter, OpenOptions, Output, Session, Strata as RustStrata, Value,
     VersionedBranchInfo, VersionedValue,
 };
+
+// =============================================================================
+// Exception hierarchy (#4)
+// =============================================================================
+
+pyo3::create_exception!(_stratadb, StrataError_,   pyo3::exceptions::PyException, "Base exception for all StrataDB errors.");
+pyo3::create_exception!(_stratadb, NotFoundError,   StrataError_, "Entity not found.");
+pyo3::create_exception!(_stratadb, ValidationError, StrataError_, "Invalid input or type mismatch.");
+pyo3::create_exception!(_stratadb, ConflictError,   StrataError_, "Version or concurrency conflict.");
+pyo3::create_exception!(_stratadb, StateError,      StrataError_, "Invalid state transition.");
+pyo3::create_exception!(_stratadb, ConstraintError, StrataError_, "Constraint or limit violation.");
+pyo3::create_exception!(_stratadb, AccessDeniedError, StrataError_, "Access denied (read-only).");
+pyo3::create_exception!(_stratadb, IoError,         StrataError_, "I/O, serialization, or internal error.");
 
 /// Convert a Python object to a stratadb Value.
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
@@ -44,49 +57,92 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         }
         Ok(Value::Object(map))
     } else {
-        Err(PyValueError::new_err("Unsupported value type"))
+        Err(ValidationError::new_err("Unsupported value type"))
     }
 }
 
 /// Convert a stratadb Value to a Python object.
-fn value_to_py(py: Python<'_>, value: Value) -> PyObject {
+fn value_to_py(py: Python<'_>, value: Value) -> PyResult<PyObject> {
     use pyo3::conversion::ToPyObject;
     match value {
-        Value::Null => py.None(),
-        Value::Bool(b) => b.to_object(py),
-        Value::Int(i) => i.to_object(py),
-        Value::Float(f) => f.to_object(py),
-        Value::String(s) => s.to_object(py),
-        Value::Bytes(b) => b.to_object(py),
+        Value::Null => Ok(py.None()),
+        Value::Bool(b) => Ok(b.to_object(py)),
+        Value::Int(i) => Ok(i.to_object(py)),
+        Value::Float(f) => Ok(f.to_object(py)),
+        Value::String(s) => Ok(s.to_object(py)),
+        Value::Bytes(b) => Ok(b.to_object(py)),
         Value::Array(arr) => {
             let list = PyList::empty_bound(py);
             for item in arr {
-                list.append(value_to_py(py, item)).unwrap();
+                list.append(value_to_py(py, item)?)?;
             }
-            list.unbind().into_any()
+            Ok(list.unbind().into_any())
         }
         Value::Object(map) => {
             let dict = PyDict::new_bound(py);
             for (k, v) in map {
-                dict.set_item(k, value_to_py(py, v)).unwrap();
+                dict.set_item(k, value_to_py(py, v)?)?;
             }
-            dict.unbind().into_any()
+            Ok(dict.unbind().into_any())
         }
     }
 }
 
 /// Convert a VersionedValue to a Python dict.
-fn versioned_to_py(py: Python<'_>, vv: VersionedValue) -> PyObject {
+fn versioned_to_py(py: Python<'_>, vv: VersionedValue) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("value", value_to_py(py, vv.value)).unwrap();
-    dict.set_item("version", vv.version).unwrap();
-    dict.set_item("timestamp", vv.timestamp).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("value", value_to_py(py, vv.value)?)?;
+    dict.set_item("version", vv.version)?;
+    dict.set_item("timestamp", vv.timestamp)?;
+    Ok(dict.unbind().into_any())
 }
 
-/// Convert stratadb error to PyErr.
+/// Convert stratadb error to PyErr with proper exception type (#4).
 fn to_py_err(e: StrataError) -> PyErr {
-    PyRuntimeError::new_err(format!("{}", e))
+    let msg = format!("{}", e);
+    match e {
+        // Not Found
+        StrataError::KeyNotFound { .. }
+        | StrataError::BranchNotFound { .. }
+        | StrataError::CollectionNotFound { .. }
+        | StrataError::StreamNotFound { .. }
+        | StrataError::CellNotFound { .. }
+        | StrataError::DocumentNotFound { .. } => NotFoundError::new_err(msg),
+
+        // Validation
+        StrataError::InvalidKey { .. }
+        | StrataError::InvalidPath { .. }
+        | StrataError::InvalidInput { .. }
+        | StrataError::WrongType { .. } => ValidationError::new_err(msg),
+
+        // Conflict
+        StrataError::VersionConflict { .. }
+        | StrataError::TransitionFailed { .. }
+        | StrataError::Conflict { .. }
+        | StrataError::TransactionConflict { .. } => ConflictError::new_err(msg),
+
+        // State
+        StrataError::BranchClosed { .. }
+        | StrataError::BranchExists { .. }
+        | StrataError::CollectionExists { .. }
+        | StrataError::TransactionNotActive
+        | StrataError::TransactionAlreadyActive => StateError::new_err(msg),
+
+        // Constraint
+        StrataError::DimensionMismatch { .. }
+        | StrataError::ConstraintViolation { .. }
+        | StrataError::HistoryTrimmed { .. }
+        | StrataError::Overflow { .. } => ConstraintError::new_err(msg),
+
+        // Access
+        StrataError::AccessDenied { .. } => AccessDeniedError::new_err(msg),
+
+        // I/O / System
+        StrataError::Io { .. }
+        | StrataError::Serialization { .. }
+        | StrataError::Internal { .. }
+        | StrataError::NotImplemented { .. } => IoError::new_err(msg),
+    }
 }
 
 /// StrataDB database handle.
@@ -97,7 +153,7 @@ fn to_py_err(e: StrataError) -> PyErr {
 pub struct PyStrata {
     inner: RustStrata,
     /// Session for transaction support. Lazily initialized.
-    session: RefCell<Option<Session>>,
+    session: Mutex<Option<Session>>,
 }
 
 #[pymethods]
@@ -110,14 +166,23 @@ impl PyStrata {
     ///     read_only: Open in read-only mode.
     #[staticmethod]
     #[pyo3(signature = (path, auto_embed=false, read_only=false))]
-    fn open(path: &str, auto_embed: bool, read_only: bool) -> PyResult<Self> {
+    fn open(py: Python<'_>, path: &str, auto_embed: bool, read_only: bool) -> PyResult<Self> {
         // Auto-download model files when auto_embed is requested (best-effort).
         #[cfg(feature = "embed")]
         if auto_embed {
             if let Err(e) = strata_intelligence::embed::download::ensure_model() {
-                eprintln!("Warning: failed to download model files: {}", e);
+                PyErr::warn_bound(
+                    py,
+                    &py.get_type_bound::<pyo3::exceptions::PyUserWarning>(),
+                    &format!("Failed to download embedding model: {}", e),
+                    1,
+                )?;
             }
         }
+
+        // Suppress unused variable warning when embed feature is disabled.
+        #[cfg(not(feature = "embed"))]
+        let _ = py;
 
         let mut opts = OpenOptions::new();
         if auto_embed {
@@ -130,7 +195,7 @@ impl PyStrata {
         let inner = RustStrata::open_with(path, opts).map_err(to_py_err)?;
         Ok(Self {
             inner,
-            session: RefCell::new(None),
+            session: Mutex::new(None),
         })
     }
 
@@ -140,7 +205,7 @@ impl PyStrata {
         let inner = RustStrata::cache().map_err(to_py_err)?;
         Ok(Self {
             inner,
-            session: RefCell::new(None),
+            session: Mutex::new(None),
         })
     }
 
@@ -181,7 +246,7 @@ impl PyStrata {
     /// Get a value by key.
     fn kv_get(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
         match self.inner.kv_get(key).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)),
+            Some(v) => Ok(value_to_py(py, v)?),
             None => Ok(py.None()),
         }
     }
@@ -203,7 +268,7 @@ impl PyStrata {
             Some(versions) => {
                 let list = PyList::empty_bound(py);
                 for vv in versions {
-                    list.append(versioned_to_py(py, vv))?;
+                    list.append(versioned_to_py(py, vv)?)?;
                 }
                 Ok(list.unbind().into_any())
             }
@@ -224,7 +289,7 @@ impl PyStrata {
     /// Get a state cell value.
     fn state_get(&self, py: Python<'_>, cell: &str) -> PyResult<PyObject> {
         match self.inner.state_get(cell).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)),
+            Some(v) => Ok(value_to_py(py, v)?),
             None => Ok(py.None()),
         }
     }
@@ -253,7 +318,7 @@ impl PyStrata {
             Some(versions) => {
                 let list = PyList::empty_bound(py);
                 for vv in versions {
-                    list.append(versioned_to_py(py, vv))?;
+                    list.append(versioned_to_py(py, vv)?)?;
                 }
                 Ok(list.unbind().into_any())
             }
@@ -274,7 +339,7 @@ impl PyStrata {
     /// Get an event by sequence number.
     fn event_get(&self, py: Python<'_>, sequence: u64) -> PyResult<PyObject> {
         match self.inner.event_get(sequence).map_err(to_py_err)? {
-            Some(vv) => Ok(versioned_to_py(py, vv)),
+            Some(vv) => Ok(versioned_to_py(py, vv)?),
             None => Ok(py.None()),
         }
     }
@@ -284,7 +349,7 @@ impl PyStrata {
         let events = self.inner.event_get_by_type(event_type).map_err(to_py_err)?;
         let list = PyList::empty_bound(py);
         for vv in events {
-            list.append(versioned_to_py(py, vv))?;
+            list.append(versioned_to_py(py, vv)?)?;
         }
         Ok(list.unbind().into_any())
     }
@@ -307,7 +372,7 @@ impl PyStrata {
     /// Get a value at a JSONPath.
     fn json_get(&self, py: Python<'_>, key: &str, path: &str) -> PyResult<PyObject> {
         match self.inner.json_get(key, path).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)),
+            Some(v) => Ok(value_to_py(py, v)?),
             None => Ok(py.None()),
         }
     }
@@ -323,7 +388,7 @@ impl PyStrata {
             Some(versions) => {
                 let list = PyList::empty_bound(py);
                 for vv in versions {
-                    list.append(versioned_to_py(py, vv))?;
+                    list.append(versioned_to_py(py, vv)?)?;
                 }
                 Ok(list.unbind().into_any())
             }
@@ -368,7 +433,7 @@ impl PyStrata {
             "cosine" => DistanceMetric::Cosine,
             "euclidean" => DistanceMetric::Euclidean,
             "dot_product" | "dotproduct" => DistanceMetric::DotProduct,
-            _ => return Err(PyValueError::new_err("Invalid metric")),
+            _ => return Err(ValidationError::new_err("Invalid metric")),
         };
         self.inner
             .vector_create_collection(collection, dimension, m)
@@ -387,7 +452,7 @@ impl PyStrata {
         let collections = self.inner.vector_list_collections().map_err(to_py_err)?;
         let list = PyList::empty_bound(py);
         for c in collections {
-            let dict = collection_info_to_py(py, c);
+            let dict = collection_info_to_py(py, c)?;
             list.append(dict)?;
         }
         Ok(list.unbind().into_any())
@@ -421,7 +486,7 @@ impl PyStrata {
                 let arr = PyArray1::from_slice_bound(py, &vd.data.embedding);
                 dict.set_item("embedding", arr)?;
                 if let Some(meta) = vd.data.metadata {
-                    dict.set_item("metadata", value_to_py(py, meta))?;
+                    dict.set_item("metadata", value_to_py(py, meta)?)?;
                 }
                 dict.set_item("version", vd.version)?;
                 dict.set_item("timestamp", vd.timestamp)?;
@@ -455,7 +520,7 @@ impl PyStrata {
             dict.set_item("key", m.key)?;
             dict.set_item("score", m.score)?;
             if let Some(meta) = m.metadata {
-                dict.set_item("metadata", value_to_py(py, meta))?;
+                dict.set_item("metadata", value_to_py(py, meta)?)?;
             }
             list.append(dict)?;
         }
@@ -468,7 +533,7 @@ impl PyStrata {
             .inner
             .vector_collection_stats(collection)
             .map_err(to_py_err)?;
-        Ok(collection_info_to_py(py, info))
+        collection_info_to_py(py, info)
     }
 
     /// Batch insert/update multiple vectors.
@@ -485,12 +550,12 @@ impl PyStrata {
                 let dict = item.downcast::<PyDict>()?;
                 let key: String = dict
                     .get_item("key")?
-                    .ok_or_else(|| PyValueError::new_err("missing 'key'"))?
+                    .ok_or_else(|| ValidationError::new_err("missing 'key'"))?
                     .extract()?;
                 let vec = extract_vector(
                     &dict
                         .get_item("vector")?
-                        .ok_or_else(|| PyValueError::new_err("missing 'vector'"))?,
+                        .ok_or_else(|| ValidationError::new_err("missing 'vector'"))?,
                 )?;
                 let meta = dict
                     .get_item("metadata")?
@@ -558,7 +623,7 @@ impl PyStrata {
     /// or None if the branch does not exist.
     fn branch_get(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
         match self.inner.branch_get(name).map_err(to_py_err)? {
-            Some(info) => Ok(versioned_branch_info_to_py(py, info)),
+            Some(info) => versioned_branch_info_to_py(py, info),
             None => Ok(py.None()),
         }
     }
@@ -596,7 +661,7 @@ impl PyStrata {
         let strat = match strategy.unwrap_or("last_writer_wins") {
             "last_writer_wins" => MergeStrategy::LastWriterWins,
             "strict" => MergeStrategy::Strict,
-            _ => return Err(PyValueError::new_err("Invalid merge strategy")),
+            _ => return Err(ValidationError::new_err("Invalid merge strategy")),
         };
         let target = self.inner.current_branch().to_string();
         let info = self.inner.merge_branches(source, &target, strat).map_err(to_py_err)?;
@@ -682,7 +747,7 @@ impl PyStrata {
     /// Returns a dict with 'branch_id', 'path', 'entry_count', 'bundle_size'.
     fn branch_export(&self, py: Python<'_>, branch: &str, path: &str) -> PyResult<PyObject> {
         let result = self.inner.branch_export(branch, path).map_err(to_py_err)?;
-        Ok(branch_export_result_to_py(py, result))
+        branch_export_result_to_py(py, result)
     }
 
     /// Import a branch from a bundle file.
@@ -690,7 +755,7 @@ impl PyStrata {
     /// Returns a dict with 'branch_id', 'transactions_applied', 'keys_written'.
     fn branch_import(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
         let result = self.inner.branch_import(path).map_err(to_py_err)?;
-        Ok(branch_import_result_to_py(py, result))
+        branch_import_result_to_py(py, result)
     }
 
     /// Validate a bundle file without importing.
@@ -701,7 +766,7 @@ impl PyStrata {
             .inner
             .branch_validate_bundle(path)
             .map_err(to_py_err)?;
-        Ok(bundle_validate_result_to_py(py, result))
+        bundle_validate_result_to_py(py, result)
     }
 
     // =========================================================================
@@ -714,7 +779,8 @@ impl PyStrata {
     /// commit() or rollback() is called.
     #[pyo3(signature = (read_only=None))]
     fn begin(&self, read_only: Option<bool>) -> PyResult<()> {
-        let mut session_ref = self.session.borrow_mut();
+        let mut session_ref = self.session.lock()
+            .map_err(|_| PyRuntimeError::new_err("session lock poisoned"))?;
         if session_ref.is_none() {
             *session_ref = Some(self.inner.session());
         }
@@ -734,10 +800,11 @@ impl PyStrata {
     ///
     /// Returns the commit version number.
     fn commit(&self) -> PyResult<u64> {
-        let mut session_ref = self.session.borrow_mut();
+        let mut session_ref = self.session.lock()
+            .map_err(|_| PyRuntimeError::new_err("session lock poisoned"))?;
         let session = session_ref
             .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("No transaction active"))?;
+            .ok_or_else(|| StateError::new_err("No transaction active"))?;
 
         match session.execute(Command::TxnCommit).map_err(to_py_err)? {
             Output::TxnCommitted { version } => Ok(version),
@@ -747,10 +814,11 @@ impl PyStrata {
 
     /// Rollback the current transaction.
     fn rollback(&self) -> PyResult<()> {
-        let mut session_ref = self.session.borrow_mut();
+        let mut session_ref = self.session.lock()
+            .map_err(|_| PyRuntimeError::new_err("session lock poisoned"))?;
         let session = session_ref
             .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("No transaction active"))?;
+            .ok_or_else(|| StateError::new_err("No transaction active"))?;
 
         session.execute(Command::TxnRollback).map_err(to_py_err)?;
         Ok(())
@@ -760,7 +828,8 @@ impl PyStrata {
     ///
     /// Returns a dict with 'id', 'status', 'started_at', or None if no transaction is active.
     fn txn_info(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let mut session_ref = self.session.borrow_mut();
+        let mut session_ref = self.session.lock()
+            .map_err(|_| PyRuntimeError::new_err("session lock poisoned"))?;
         if session_ref.is_none() {
             return Ok(py.None());
         }
@@ -781,7 +850,8 @@ impl PyStrata {
 
     /// Check if a transaction is currently active.
     fn txn_is_active(&self) -> PyResult<bool> {
-        let mut session_ref = self.session.borrow_mut();
+        let mut session_ref = self.session.lock()
+            .map_err(|_| PyRuntimeError::new_err("session lock poisoned"))?;
         if session_ref.is_none() {
             return Ok(false);
         }
@@ -845,7 +915,7 @@ impl PyStrata {
         match self.inner.kv_getv(key).map_err(to_py_err)? {
             Some(versions) if !versions.is_empty() => {
                 // Return the latest version
-                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap())?)
             }
             _ => Ok(py.None()),
         }
@@ -858,7 +928,7 @@ impl PyStrata {
         match self.inner.state_getv(cell).map_err(to_py_err)? {
             Some(versions) if !versions.is_empty() => {
                 // Return the latest version
-                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap())?)
             }
             _ => Ok(py.None()),
         }
@@ -871,7 +941,7 @@ impl PyStrata {
         match self.inner.json_getv(key).map_err(to_py_err)? {
             Some(versions) if !versions.is_empty() => {
                 // Return the latest version
-                Ok(versioned_to_py(py, versions.into_iter().next().unwrap()))
+                Ok(versioned_to_py(py, versions.into_iter().next().unwrap())?)
             }
             _ => Ok(py.None()),
         }
@@ -907,8 +977,6 @@ impl PyStrata {
             Output::Keys(keys) => {
                 let dict = PyDict::new_bound(py);
                 dict.set_item("keys", keys)?;
-                // KvList returns Output::Keys which doesn't include cursor
-                // Cursor-based pagination for KV is not yet fully implemented in core
                 Ok(dict.unbind().into_any())
             }
             _ => Err(PyRuntimeError::new_err("Unexpected output for KvList")),
@@ -941,7 +1009,7 @@ impl PyStrata {
             Output::VersionedValues(events) => {
                 let list = PyList::empty_bound(py);
                 for vv in events {
-                    list.append(versioned_to_py(py, vv))?;
+                    list.append(versioned_to_py(py, vv)?)?;
                 }
                 Ok(list.unbind().into_any())
             }
@@ -972,7 +1040,7 @@ impl PyStrata {
             Some("cosine") => Some(DistanceMetric::Cosine),
             Some("euclidean") => Some(DistanceMetric::Euclidean),
             Some("dot_product") | Some("dotproduct") => Some(DistanceMetric::DotProduct),
-            Some(m) => return Err(PyValueError::new_err(format!("Invalid metric: {}", m))),
+            Some(m) => return Err(ValidationError::new_err(format!("Invalid metric: {}", m))),
             None => None,
         };
 
@@ -983,11 +1051,11 @@ impl PyStrata {
                     let dict = item.downcast::<PyDict>()?;
                     let field: String = dict
                         .get_item("field")?
-                        .ok_or_else(|| PyValueError::new_err("filter missing 'field'"))?
+                        .ok_or_else(|| ValidationError::new_err("filter missing 'field'"))?
                         .extract()?;
                     let op_str: String = dict
                         .get_item("op")?
-                        .ok_or_else(|| PyValueError::new_err("filter missing 'op'"))?
+                        .ok_or_else(|| ValidationError::new_err("filter missing 'op'"))?
                         .extract()?;
                     let op = match op_str.as_str() {
                         "eq" => FilterOp::Eq,
@@ -999,7 +1067,7 @@ impl PyStrata {
                         "in" => FilterOp::In,
                         "contains" => FilterOp::Contains,
                         _ => {
-                            return Err(PyValueError::new_err(format!(
+                            return Err(ValidationError::new_err(format!(
                                 "Invalid filter op: {}",
                                 op_str
                             )))
@@ -1007,7 +1075,7 @@ impl PyStrata {
                     };
                     let value_obj = dict
                         .get_item("value")?
-                        .ok_or_else(|| PyValueError::new_err("filter missing 'value'"))?;
+                        .ok_or_else(|| ValidationError::new_err("filter missing 'value'"))?;
                     let value = py_to_value(&value_obj)?;
                     filters.push(MetadataFilter { field, op, value });
                 }
@@ -1037,7 +1105,7 @@ impl PyStrata {
                     dict.set_item("key", m.key)?;
                     dict.set_item("score", m.score)?;
                     if let Some(meta) = m.metadata {
-                        dict.set_item("metadata", value_to_py(py, meta))?;
+                        dict.set_item("metadata", value_to_py(py, meta)?)?;
                     }
                     list.append(dict)?;
                 }
@@ -1132,6 +1200,19 @@ impl PyStrata {
             _ => Err(PyRuntimeError::new_err("Unexpected output for Search")),
         }
     }
+
+    // =========================================================================
+    // Retention (#8)
+    // =========================================================================
+
+    /// Apply retention policy (trigger garbage collection).
+    fn retention_apply(&self) -> PyResult<()> {
+        self.inner
+            .executor()
+            .execute(Command::RetentionApply { branch: None })
+            .map_err(to_py_err)?;
+        Ok(())
+    }
 }
 
 /// Extract a vector from either a numpy array or a Python list.
@@ -1145,73 +1226,81 @@ fn extract_vector(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
         let vec: PyResult<Vec<f32>> = list.iter().map(|item| item.extract::<f32>()).collect();
         return vec;
     }
-    Err(PyValueError::new_err(
+    Err(ValidationError::new_err(
         "Expected numpy array or list of floats",
     ))
 }
 
 /// Convert CollectionInfo to Python dict.
-fn collection_info_to_py(py: Python<'_>, c: CollectionInfo) -> PyObject {
+fn collection_info_to_py(py: Python<'_>, c: CollectionInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("name", c.name).unwrap();
-    dict.set_item("dimension", c.dimension).unwrap();
-    dict.set_item("metric", format!("{:?}", c.metric).to_lowercase())
-        .unwrap();
-    dict.set_item("count", c.count).unwrap();
-    dict.set_item("index_type", c.index_type).unwrap();
-    dict.set_item("memory_bytes", c.memory_bytes).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("name", c.name)?;
+    dict.set_item("dimension", c.dimension)?;
+    dict.set_item("metric", format!("{:?}", c.metric).to_lowercase())?;
+    dict.set_item("count", c.count)?;
+    dict.set_item("index_type", c.index_type)?;
+    dict.set_item("memory_bytes", c.memory_bytes)?;
+    Ok(dict.unbind().into_any())
 }
 
 /// Convert VersionedBranchInfo to Python dict.
-fn versioned_branch_info_to_py(py: Python<'_>, info: VersionedBranchInfo) -> PyObject {
+fn versioned_branch_info_to_py(py: Python<'_>, info: VersionedBranchInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("id", info.info.id.as_str()).unwrap();
-    dict.set_item("status", format!("{:?}", info.info.status).to_lowercase())
-        .unwrap();
-    dict.set_item("created_at", info.info.created_at).unwrap();
-    dict.set_item("updated_at", info.info.updated_at).unwrap();
+    dict.set_item("id", info.info.id.as_str())?;
+    dict.set_item("status", format!("{:?}", info.info.status).to_lowercase())?;
+    dict.set_item("created_at", info.info.created_at)?;
+    dict.set_item("updated_at", info.info.updated_at)?;
     if let Some(parent) = info.info.parent_id {
-        dict.set_item("parent_id", parent.as_str()).unwrap();
+        dict.set_item("parent_id", parent.as_str())?;
     }
-    dict.set_item("version", info.version).unwrap();
-    dict.set_item("timestamp", info.timestamp).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("version", info.version)?;
+    dict.set_item("timestamp", info.timestamp)?;
+    Ok(dict.unbind().into_any())
 }
 
 /// Convert BranchExportResult to Python dict.
-fn branch_export_result_to_py(py: Python<'_>, r: BranchExportResult) -> PyObject {
+fn branch_export_result_to_py(py: Python<'_>, r: BranchExportResult) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("branch_id", r.branch_id).unwrap();
-    dict.set_item("path", r.path).unwrap();
-    dict.set_item("entry_count", r.entry_count).unwrap();
-    dict.set_item("bundle_size", r.bundle_size).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("branch_id", r.branch_id)?;
+    dict.set_item("path", r.path)?;
+    dict.set_item("entry_count", r.entry_count)?;
+    dict.set_item("bundle_size", r.bundle_size)?;
+    Ok(dict.unbind().into_any())
 }
 
 /// Convert BranchImportResult to Python dict.
-fn branch_import_result_to_py(py: Python<'_>, r: BranchImportResult) -> PyObject {
+fn branch_import_result_to_py(py: Python<'_>, r: BranchImportResult) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("branch_id", r.branch_id).unwrap();
-    dict.set_item("transactions_applied", r.transactions_applied)
-        .unwrap();
-    dict.set_item("keys_written", r.keys_written).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("branch_id", r.branch_id)?;
+    dict.set_item("transactions_applied", r.transactions_applied)?;
+    dict.set_item("keys_written", r.keys_written)?;
+    Ok(dict.unbind().into_any())
 }
 
 /// Convert BundleValidateResult to Python dict.
-fn bundle_validate_result_to_py(py: Python<'_>, r: BundleValidateResult) -> PyObject {
+fn bundle_validate_result_to_py(py: Python<'_>, r: BundleValidateResult) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
-    dict.set_item("branch_id", r.branch_id).unwrap();
-    dict.set_item("format_version", r.format_version).unwrap();
-    dict.set_item("entry_count", r.entry_count).unwrap();
-    dict.set_item("checksums_valid", r.checksums_valid).unwrap();
-    dict.unbind().into_any()
+    dict.set_item("branch_id", r.branch_id)?;
+    dict.set_item("format_version", r.format_version)?;
+    dict.set_item("entry_count", r.entry_count)?;
+    dict.set_item("checksums_valid", r.checksums_valid)?;
+    Ok(dict.unbind().into_any())
 }
 
 /// Python module initialization.
 #[pymodule]
 fn _stratadb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStrata>()?;
+
+    // Register exception hierarchy
+    m.add("StrataError", m.py().get_type_bound::<StrataError_>())?;
+    m.add("NotFoundError", m.py().get_type_bound::<NotFoundError>())?;
+    m.add("ValidationError", m.py().get_type_bound::<ValidationError>())?;
+    m.add("ConflictError", m.py().get_type_bound::<ConflictError>())?;
+    m.add("StateError", m.py().get_type_bound::<StateError>())?;
+    m.add("ConstraintError", m.py().get_type_bound::<ConstraintError>())?;
+    m.add("AccessDeniedError", m.py().get_type_bound::<AccessDeniedError>())?;
+    m.add("IoError", m.py().get_type_bound::<IoError>())?;
+
     Ok(())
 }
