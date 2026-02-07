@@ -27,6 +27,14 @@ Example usage:
         db.kv_put("a", 1)
         db.kv_put("b", 2)
     # Auto-commits on success, auto-rollbacks on exception
+
+Limitations:
+    - **Bytes roundtrip via bundles:** ``Value.Bytes`` (Python ``bytes``) stored in
+      the database will survive normal get/put operations, but a bundle
+      export → import cycle serializes data through JSON. Because JSON has no
+      native binary type, byte values are base64-encoded on export and decoded
+      as ``str`` on import. After a roundtrip the value will come back as a
+      Python ``str`` instead of ``bytes``.
 """
 
 from ._stratadb import Strata as _Strata

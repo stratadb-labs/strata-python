@@ -149,7 +149,7 @@ fn to_py_err(e: StrataError) -> PyErr {
 ///
 /// This is the main entry point for interacting with StrataDB from Python.
 /// All operations go through this class.
-#[pyclass(name = "Strata")]
+#[pyclass(name = "Strata", subclass)]
 pub struct PyStrata {
     inner: RustStrata,
     /// Session for transaction support. Lazily initialized.
@@ -953,14 +953,17 @@ impl PyStrata {
 
     /// List keys with pagination support.
     ///
-    /// Returns a dict with 'keys' and optionally 'cursor' for the next page.
-    #[pyo3(signature = (prefix=None, limit=None, cursor=None))]
+    /// Returns a dict with 'keys'.
+    ///
+    /// Note: Cursor-based pagination is not yet supported for KV lists.
+    /// The underlying executor returns keys without a continuation cursor.
+    /// Use `prefix` and `limit` to narrow results.
+    #[pyo3(signature = (prefix=None, limit=None))]
     fn kv_list_paginated(
         &self,
         py: Python<'_>,
         prefix: Option<&str>,
         limit: Option<u64>,
-        cursor: Option<&str>,
     ) -> PyResult<PyObject> {
         match self
             .inner
@@ -969,7 +972,7 @@ impl PyStrata {
                 branch: None,
                 space: None,
                 prefix: prefix.map(|s| s.to_string()),
-                cursor: cursor.map(|s| s.to_string()),
+                cursor: None,
                 limit,
             })
             .map_err(to_py_err)?
