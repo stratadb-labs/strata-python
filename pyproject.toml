@@ -42,6 +42,6 @@ Repository = "https://github.com/stratadb-labs/strata-python"
 Documentation = "https://stratadb.org"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "embed"]
 python-source = "python"
 module-name = "stratadb._stratadb"

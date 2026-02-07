@@ -10,10 +10,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::stratadb::{
-    BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
+    AccessMode, BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
     CollectionInfo, Command, DistanceMetric, Error as StrataError, FilterOp, MergeStrategy,
-    MetadataFilter, Output, Session, Strata as RustStrata, Value, VersionedBranchInfo,
-    VersionedValue,
+    MetadataFilter, OpenOptions, Output, Session, Strata as RustStrata, Value,
+    VersionedBranchInfo, VersionedValue,
 };
 
 /// Convert a Python object to a stratadb Value.
@@ -103,9 +103,31 @@ pub struct PyStrata {
 #[pymethods]
 impl PyStrata {
     /// Open a database at the given path.
+    ///
+    /// Args:
+    ///     path: Directory path for the database.
+    ///     auto_embed: Enable automatic text embedding for semantic search.
+    ///     read_only: Open in read-only mode.
     #[staticmethod]
-    fn open(path: &str) -> PyResult<Self> {
-        let inner = RustStrata::open(path).map_err(to_py_err)?;
+    #[pyo3(signature = (path, auto_embed=false, read_only=false))]
+    fn open(path: &str, auto_embed: bool, read_only: bool) -> PyResult<Self> {
+        // Auto-download model files when auto_embed is requested (best-effort).
+        #[cfg(feature = "embed")]
+        if auto_embed {
+            if let Err(e) = strata_intelligence::embed::download::ensure_model() {
+                eprintln!("Warning: failed to download model files: {}", e);
+            }
+        }
+
+        let mut opts = OpenOptions::new();
+        if auto_embed {
+            opts = opts.auto_embed(true);
+        }
+        if read_only {
+            opts = opts.access_mode(AccessMode::ReadOnly);
+        }
+
+        let inner = RustStrata::open_with(path, opts).map_err(to_py_err)?;
         Ok(Self {
             inner,
             session: RefCell::new(None),
@@ -120,6 +142,30 @@ impl PyStrata {
             inner,
             session: RefCell::new(None),
         })
+    }
+
+    /// Download model files for auto-embedding.
+    ///
+    /// Downloads MiniLM-L6-v2 model files to ~/.stratadb/models/minilm-l6-v2/.
+    /// Called automatically when auto_embed=True, but can be called explicitly
+    /// to pre-download (e.g., during pip install).
+    ///
+    /// Returns the path where model files are stored.
+    #[staticmethod]
+    fn setup() -> PyResult<String> {
+        #[cfg(feature = "embed")]
+        {
+            let path = strata_intelligence::embed::download::ensure_model()
+                .map_err(|e| PyRuntimeError::new_err(e))?;
+            Ok(path.to_string_lossy().into_owned())
+        }
+
+        #[cfg(not(feature = "embed"))]
+        {
+            Err(PyRuntimeError::new_err(
+                "The 'embed' feature is not enabled in this build",
+            ))
+        }
     }
 
     // =========================================================================

@@ -66,6 +66,27 @@ class Transaction:
         return False  # Don't suppress exceptions
 
 
+def setup() -> str:
+    """Download model files for auto-embedding.
+
+    Downloads MiniLM-L6-v2 model files (~80MB) to ~/.stratadb/models/minilm-l6-v2/.
+    Called automatically when ``auto_embed=True`` is passed to ``Strata.open()``,
+    but can be called explicitly to pre-download during installation.
+
+    Returns:
+        The path where model files are stored.
+
+    Raises:
+        RuntimeError: If the download fails.
+
+    Example::
+
+        import stratadb
+        stratadb.setup()  # pre-download model files
+    """
+    return _Strata.setup()
+
+
 class Strata(_Strata):
     """StrataDB database handle with transaction support.
 
@@ -98,5 +119,5 @@ class Strata(_Strata):
         return Transaction(self, read_only)
 
 
-__all__ = ["Strata", "Transaction"]
+__all__ = ["Strata", "Transaction", "setup"]
 __version__ = "0.6.0"

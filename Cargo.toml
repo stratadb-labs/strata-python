@@ -10,6 +10,10 @@ repository = "https://github.com/stratadb-labs/strata-python"
 name = "_stratadb"
 crate-type = ["cdylib"]
 
+[features]
+default = ["embed"]
+embed = ["stratadb/embed", "dep:strata-intelligence"]
+
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
@@ -17,6 +21,9 @@ numpy = "0.22"
 # Use git dependency for development, switch to crates.io version on release
 stratadb = { git = "https://github.com/stratadb-labs/strata-core", branch = "main" }
 # stratadb = "0.5"  # Uncomment when published to crates.io
+
+# Intelligence crate for model download (embed feature only)
+strata-intelligence = { git = "https://github.com/stratadb-labs/strata-core", branch = "main", features = ["embed"], optional = true }
 
 [build-dependencies]
 pyo3-build-config = "0.22"
