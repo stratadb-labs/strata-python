@@ -602,6 +602,23 @@ class Strata:
         """Download model files for auto-embedding."""
         return _Strata.setup()
 
+    # -- Model configuration --------------------------------------------------
+
+    def configure_model(self, endpoint, model, api_key=None, timeout_ms=None):
+        """Configure an inference model endpoint for intelligent search.
+
+        When a model is configured, ``search()`` transparently expands queries
+        using the model for better recall.  Without a model, search works the
+        same as before.
+
+        Args:
+            endpoint: OpenAI-compatible API endpoint URL (e.g. ``"http://localhost:11434/v1"``).
+            model: Model name (e.g. ``"qwen3:1.7b"``).
+            api_key: Optional bearer token.
+            timeout_ms: Request timeout in milliseconds (default 5000).
+        """
+        self._inner.configure_model(endpoint, model, api_key=api_key, timeout_ms=timeout_ms)
+
     # -- Properties -----------------------------------------------------------
 
     @property

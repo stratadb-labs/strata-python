@@ -103,6 +103,25 @@ class Strata:
         """
         ...
 
+    # -- Model Configuration --------------------------------------------------
+
+    def configure_model(
+        self,
+        endpoint: str,
+        model: str,
+        api_key: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> None:
+        """Configure an inference model endpoint for intelligent search.
+
+        Args:
+            endpoint: OpenAI-compatible API endpoint URL.
+            model: Model name (e.g. ``"qwen3:1.7b"``).
+            api_key: Optional bearer token for the endpoint.
+            timeout_ms: Request timeout in milliseconds (default 5000).
+        """
+        ...
+
     # -- KV Store -------------------------------------------------------------
 
     def kv_put(self, key: str, value: Value) -> int:

@@ -1384,6 +1384,41 @@ impl PyStrata {
     }
 
     // =========================================================================
+    // Model Configuration
+    // =========================================================================
+
+    /// Configure an inference model endpoint for intelligent search.
+    ///
+    /// When a model is configured, `search()` transparently expands queries
+    /// using the model for better recall. Search works identically without a model;
+    /// the model is an invisible accelerator.
+    ///
+    /// Args:
+    ///     endpoint: OpenAI-compatible API endpoint URL (e.g. "http://localhost:11434/v1").
+    ///     model: Model name (e.g. "qwen3:1.7b").
+    ///     api_key: Optional bearer token for the endpoint.
+    ///     timeout_ms: Request timeout in milliseconds (default: 5000).
+    #[pyo3(signature = (endpoint, model, api_key=None, timeout_ms=None))]
+    fn configure_model(
+        &self,
+        endpoint: &str,
+        model: &str,
+        api_key: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<()> {
+        self.inner
+            .executor()
+            .execute(Command::ConfigureModel {
+                endpoint: endpoint.to_string(),
+                model: model.to_string(),
+                api_key: api_key.map(|s| s.to_string()),
+                timeout_ms,
+            })
+            .map_err(to_py_err)?;
+        Ok(())
+    }
+
+    // =========================================================================
     // Search (NEW)
     // =========================================================================
 
