@@ -109,16 +109,26 @@ class Strata:
         """Store a key-value pair. Returns the version number."""
         ...
 
-    def kv_get(self, key: str) -> Value | None:
-        """Get a value by key. Returns ``None`` if not found."""
+    def kv_get(self, key: str, as_of: Optional[int] = None) -> Value | None:
+        """Get a value by key. Returns ``None`` if not found.
+
+        Args:
+            key: The key to look up.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def kv_delete(self, key: str) -> bool:
         """Delete a key. Returns ``True`` if the key existed."""
         ...
 
-    def kv_list(self, prefix: Optional[str] = None) -> list[str]:
-        """List keys with optional prefix filter."""
+    def kv_list(self, prefix: Optional[str] = None, as_of: Optional[int] = None) -> list[str]:
+        """List keys with optional prefix filter.
+
+        Args:
+            prefix: Optional prefix to filter keys.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def kv_history(self, key: str) -> list[dict[str, Any]] | None:
@@ -140,6 +150,7 @@ class Strata:
         self,
         prefix: Optional[str] = None,
         limit: Optional[int] = None,
+        as_of: Optional[int] = None,
     ) -> dict[str, Any]:
         """List keys with pagination support.
 
@@ -147,6 +158,11 @@ class Strata:
 
         Note:
             Cursor-based pagination is not yet supported for KV lists.
+
+        Args:
+            prefix: Optional prefix to filter keys.
+            limit: Optional maximum number of keys to return.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
         """
         ...
 
@@ -156,8 +172,13 @@ class Strata:
         """Set a state cell value. Returns the version number."""
         ...
 
-    def state_get(self, cell: str) -> Value | None:
-        """Get a state cell value. Returns ``None`` if not found."""
+    def state_get(self, cell: str, as_of: Optional[int] = None) -> Value | None:
+        """Get a state cell value. Returns ``None`` if not found.
+
+        Args:
+            cell: The state cell name.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def state_init(self, cell: str, value: Value) -> int:
@@ -184,8 +205,13 @@ class Strata:
         """Delete a state cell. Returns ``True`` if it existed."""
         ...
 
-    def state_list(self, prefix: Optional[str] = None) -> list[str]:
-        """List state cell names with optional prefix filter."""
+    def state_list(self, prefix: Optional[str] = None, as_of: Optional[int] = None) -> list[str]:
+        """List state cell names with optional prefix filter.
+
+        Args:
+            prefix: Optional prefix to filter cell names.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def state_get_versioned(self, cell: str) -> dict[str, Any] | None:
@@ -198,12 +224,22 @@ class Strata:
         """Append an event to the log. Returns the sequence number."""
         ...
 
-    def event_get(self, sequence: int) -> dict[str, Any] | None:
-        """Get an event by sequence number."""
+    def event_get(self, sequence: int, as_of: Optional[int] = None) -> dict[str, Any] | None:
+        """Get an event by sequence number.
+
+        Args:
+            sequence: The event sequence number.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
-    def event_list(self, event_type: str) -> list[dict[str, Any]]:
-        """List events by type."""
+    def event_list(self, event_type: str, as_of: Optional[int] = None) -> list[dict[str, Any]]:
+        """List events by type.
+
+        Args:
+            event_type: The event type to filter by.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def event_len(self) -> int:
@@ -215,8 +251,16 @@ class Strata:
         event_type: str,
         limit: Optional[int] = None,
         after: Optional[int] = None,
+        as_of: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """List events by type with pagination support."""
+        """List events by type with pagination support.
+
+        Args:
+            event_type: The event type to filter by.
+            limit: Optional maximum number of events to return.
+            after: Optional sequence number to paginate from.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     # -- JSON Store -----------------------------------------------------------
@@ -225,8 +269,14 @@ class Strata:
         """Set a value at a JSONPath. Returns the version number."""
         ...
 
-    def json_get(self, key: str, path: str) -> Value | None:
-        """Get a value at a JSONPath."""
+    def json_get(self, key: str, path: str, as_of: Optional[int] = None) -> Value | None:
+        """Get a value at a JSONPath.
+
+        Args:
+            key: The document key.
+            path: JSONPath expression.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     def json_delete(self, key: str, path: str) -> int:
@@ -242,11 +292,18 @@ class Strata:
         limit: int,
         prefix: Optional[str] = None,
         cursor: Optional[str] = None,
+        as_of: Optional[int] = None,
     ) -> dict[str, Any]:
         """List JSON document keys.
 
         Returns ``{"keys": [...], "cursor": ...}`` where cursor is present
         only when more pages are available.
+
+        Args:
+            limit: Maximum number of keys to return.
+            prefix: Optional prefix to filter keys.
+            cursor: Optional cursor for pagination.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
         """
         ...
 
@@ -294,11 +351,16 @@ class Strata:
         """Insert or update a vector. Returns the version number."""
         ...
 
-    def vector_get(self, collection: str, key: str) -> dict[str, Any] | None:
+    def vector_get(self, collection: str, key: str, as_of: Optional[int] = None) -> dict[str, Any] | None:
         """Get a vector by key.
 
         Returns ``{"key", "embedding", "metadata", "version", "timestamp"}``
         or ``None``.
+
+        Args:
+            collection: The collection name.
+            key: The vector key.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
         """
         ...
 
@@ -311,10 +373,17 @@ class Strata:
         collection: str,
         query: npt.NDArray[np.float32] | list[float],
         k: int,
+        as_of: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Search for similar vectors.
 
         Returns a list of ``{"key", "score", "metadata"}`` dicts.
+
+        Args:
+            collection: The collection name.
+            query: Query vector (numpy array or list of floats).
+            k: Number of nearest neighbors to return.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
         """
         ...
 
@@ -341,8 +410,18 @@ class Strata:
         k: int,
         metric: Optional[str] = None,
         filter: Optional[list[dict[str, Any]]] = None,
+        as_of: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search for similar vectors with optional filter and metric override."""
+        """Search for similar vectors with optional filter and metric override.
+
+        Args:
+            collection: The collection name.
+            query: Query vector (numpy array or list of floats).
+            k: Number of nearest neighbors to return.
+            metric: Optional distance metric override.
+            filter: Optional metadata filters.
+            as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
         ...
 
     # -- Branch Management ----------------------------------------------------
@@ -527,6 +606,16 @@ class Strata:
 
         Returns a list of ``{"entity", "primitive", "score", "rank",
         "snippet"}`` dicts.
+        """
+        ...
+
+    # -- Time-Travel ----------------------------------------------------------
+
+    def time_range(self) -> dict[str, Any]:
+        """Get the time range of data in the current branch.
+
+        Returns ``{"oldest_ts", "latest_ts"}`` where values are microseconds
+        since epoch, or ``None`` if the branch has no data.
         """
         ...
 

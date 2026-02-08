@@ -137,6 +137,9 @@ fn to_py_err(e: StrataError) -> PyErr {
         // Access
         StrataError::AccessDenied { .. } => AccessDeniedError::new_err(msg),
 
+        // Constraint (history trimmed / unavailable)
+        StrataError::HistoryUnavailable { .. } => ConstraintError::new_err(msg),
+
         // I/O / System
         StrataError::Io { .. }
         | StrataError::Serialization { .. }
@@ -244,10 +247,25 @@ impl PyStrata {
     }
 
     /// Get a value by key.
-    fn kv_get(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
-        match self.inner.kv_get(key).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)?),
-            None => Ok(py.None()),
+    ///
+    /// Args:
+    ///     key: The key to look up.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (key, as_of=None))]
+    fn kv_get(&self, py: Python<'_>, key: &str, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::KvGet {
+                branch: None, space: None, key: key.to_string(), as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::Maybe(Some(v)) => Ok(value_to_py(py, v)?),
+                Output::Maybe(None) => Ok(py.None()),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            match self.inner.kv_get(key).map_err(to_py_err)? {
+                Some(v) => Ok(value_to_py(py, v)?),
+                None => Ok(py.None()),
+            }
         }
     }
 
@@ -257,9 +275,25 @@ impl PyStrata {
     }
 
     /// List keys with optional prefix filter.
-    #[pyo3(signature = (prefix=None))]
-    fn kv_list(&self, prefix: Option<&str>) -> PyResult<Vec<String>> {
-        self.inner.kv_list(prefix).map_err(to_py_err)
+    ///
+    /// Args:
+    ///     prefix: Optional prefix to filter keys.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (prefix=None, as_of=None))]
+    fn kv_list(&self, prefix: Option<&str>, as_of: Option<u64>) -> PyResult<Vec<String>> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::KvList {
+                branch: None, space: None,
+                prefix: prefix.map(|s| s.to_string()),
+                cursor: None, limit: None,
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            self.inner.kv_list(prefix).map_err(to_py_err)
+        }
     }
 
     /// Get version history for a key.
@@ -287,10 +321,25 @@ impl PyStrata {
     }
 
     /// Get a state cell value.
-    fn state_get(&self, py: Python<'_>, cell: &str) -> PyResult<PyObject> {
-        match self.inner.state_get(cell).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)?),
-            None => Ok(py.None()),
+    ///
+    /// Args:
+    ///     cell: The state cell name.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (cell, as_of=None))]
+    fn state_get(&self, py: Python<'_>, cell: &str, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::StateGet {
+                branch: None, space: None, cell: cell.to_string(), as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::Maybe(Some(v)) => Ok(value_to_py(py, v)?),
+                Output::Maybe(None) => Ok(py.None()),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            match self.inner.state_get(cell).map_err(to_py_err)? {
+                Some(v) => Ok(value_to_py(py, v)?),
+                None => Ok(py.None()),
+            }
         }
     }
 
@@ -337,21 +386,59 @@ impl PyStrata {
     }
 
     /// Get an event by sequence number.
-    fn event_get(&self, py: Python<'_>, sequence: u64) -> PyResult<PyObject> {
-        match self.inner.event_get(sequence).map_err(to_py_err)? {
-            Some(vv) => Ok(versioned_to_py(py, vv)?),
-            None => Ok(py.None()),
+    ///
+    /// Args:
+    ///     sequence: The event sequence number.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (sequence, as_of=None))]
+    fn event_get(&self, py: Python<'_>, sequence: u64, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::EventGet {
+                branch: None, space: None, sequence, as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::MaybeVersioned(Some(vv)) => Ok(versioned_to_py(py, vv)?),
+                Output::MaybeVersioned(None) => Ok(py.None()),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            match self.inner.event_get(sequence).map_err(to_py_err)? {
+                Some(vv) => Ok(versioned_to_py(py, vv)?),
+                None => Ok(py.None()),
+            }
         }
     }
 
     /// List events by type.
-    fn event_list(&self, py: Python<'_>, event_type: &str) -> PyResult<PyObject> {
-        let events = self.inner.event_get_by_type(event_type).map_err(to_py_err)?;
-        let list = PyList::empty_bound(py);
-        for vv in events {
-            list.append(versioned_to_py(py, vv)?)?;
+    ///
+    /// Args:
+    ///     event_type: The event type to filter by.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (event_type, as_of=None))]
+    fn event_list(&self, py: Python<'_>, event_type: &str, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::EventGetByType {
+                branch: None, space: None,
+                event_type: event_type.to_string(),
+                limit: None, after_sequence: None,
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::VersionedValues(events) => {
+                    let list = PyList::empty_bound(py);
+                    for vv in events {
+                        list.append(versioned_to_py(py, vv)?)?;
+                    }
+                    Ok(list.unbind().into_any())
+                }
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            let events = self.inner.event_get_by_type(event_type).map_err(to_py_err)?;
+            let list = PyList::empty_bound(py);
+            for vv in events {
+                list.append(versioned_to_py(py, vv)?)?;
+            }
+            Ok(list.unbind().into_any())
         }
-        Ok(list.unbind().into_any())
     }
 
     /// Get total event count.
@@ -370,10 +457,28 @@ impl PyStrata {
     }
 
     /// Get a value at a JSONPath.
-    fn json_get(&self, py: Python<'_>, key: &str, path: &str) -> PyResult<PyObject> {
-        match self.inner.json_get(key, path).map_err(to_py_err)? {
-            Some(v) => Ok(value_to_py(py, v)?),
-            None => Ok(py.None()),
+    ///
+    /// Args:
+    ///     key: The document key.
+    ///     path: JSONPath expression.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (key, path, as_of=None))]
+    fn json_get(&self, py: Python<'_>, key: &str, path: &str, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::JsonGet {
+                branch: None, space: None,
+                key: key.to_string(), path: path.to_string(),
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::Maybe(Some(v)) => Ok(value_to_py(py, v)?),
+                Output::Maybe(None) => Ok(py.None()),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            match self.inner.json_get(key, path).map_err(to_py_err)? {
+                Some(v) => Ok(value_to_py(py, v)?),
+                None => Ok(py.None()),
+            }
         }
     }
 
@@ -397,24 +502,51 @@ impl PyStrata {
     }
 
     /// List JSON document keys.
-    #[pyo3(signature = (limit, prefix=None, cursor=None))]
+    ///
+    /// Args:
+    ///     limit: Maximum number of keys to return.
+    ///     prefix: Optional prefix to filter keys.
+    ///     cursor: Optional cursor for pagination.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (limit, prefix=None, cursor=None, as_of=None))]
     fn json_list(
         &self,
         py: Python<'_>,
         limit: u64,
         prefix: Option<&str>,
         cursor: Option<&str>,
+        as_of: Option<u64>,
     ) -> PyResult<PyObject> {
-        let (keys, next_cursor) = self
-            .inner
-            .json_list(prefix.map(|s| s.to_string()), cursor.map(|s| s.to_string()), limit)
-            .map_err(to_py_err)?;
-        let dict = PyDict::new_bound(py);
-        dict.set_item("keys", keys)?;
-        if let Some(c) = next_cursor {
-            dict.set_item("cursor", c)?;
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::JsonList {
+                branch: None, space: None,
+                prefix: prefix.map(|s| s.to_string()),
+                cursor: cursor.map(|s| s.to_string()),
+                limit,
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::JsonListResult { keys, cursor: next_cursor } => {
+                    let dict = PyDict::new_bound(py);
+                    dict.set_item("keys", keys)?;
+                    if let Some(c) = next_cursor {
+                        dict.set_item("cursor", c)?;
+                    }
+                    Ok(dict.unbind().into_any())
+                }
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
+            }
+        } else {
+            let (keys, next_cursor) = self
+                .inner
+                .json_list(prefix.map(|s| s.to_string()), cursor.map(|s| s.to_string()), limit)
+                .map_err(to_py_err)?;
+            let dict = PyDict::new_bound(py);
+            dict.set_item("keys", keys)?;
+            if let Some(c) = next_cursor {
+                dict.set_item("cursor", c)?;
+            }
+            Ok(dict.unbind().into_any())
         }
-        Ok(dict.unbind().into_any())
     }
 
     // =========================================================================
@@ -478,21 +610,51 @@ impl PyStrata {
     }
 
     /// Get a vector by key.
-    fn vector_get(&self, py: Python<'_>, collection: &str, key: &str) -> PyResult<PyObject> {
-        match self.inner.vector_get(collection, key).map_err(to_py_err)? {
-            Some(vd) => {
-                let dict = PyDict::new_bound(py);
-                dict.set_item("key", &vd.key)?;
-                let arr = PyArray1::from_slice_bound(py, &vd.data.embedding);
-                dict.set_item("embedding", arr)?;
-                if let Some(meta) = vd.data.metadata {
-                    dict.set_item("metadata", value_to_py(py, meta)?)?;
+    ///
+    /// Args:
+    ///     collection: The collection name.
+    ///     key: The vector key.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (collection, key, as_of=None))]
+    fn vector_get(&self, py: Python<'_>, collection: &str, key: &str, as_of: Option<u64>) -> PyResult<PyObject> {
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::VectorGet {
+                branch: None, space: None,
+                collection: collection.to_string(),
+                key: key.to_string(),
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::VectorData(Some(vd)) => {
+                    let dict = PyDict::new_bound(py);
+                    dict.set_item("key", &vd.key)?;
+                    let arr = PyArray1::from_slice_bound(py, &vd.data.embedding);
+                    dict.set_item("embedding", arr)?;
+                    if let Some(meta) = vd.data.metadata {
+                        dict.set_item("metadata", value_to_py(py, meta)?)?;
+                    }
+                    dict.set_item("version", vd.version)?;
+                    dict.set_item("timestamp", vd.timestamp)?;
+                    Ok(dict.unbind().into_any())
                 }
-                dict.set_item("version", vd.version)?;
-                dict.set_item("timestamp", vd.timestamp)?;
-                Ok(dict.unbind().into_any())
+                Output::VectorData(None) => Ok(py.None()),
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
             }
-            None => Ok(py.None()),
+        } else {
+            match self.inner.vector_get(collection, key).map_err(to_py_err)? {
+                Some(vd) => {
+                    let dict = PyDict::new_bound(py);
+                    dict.set_item("key", &vd.key)?;
+                    let arr = PyArray1::from_slice_bound(py, &vd.data.embedding);
+                    dict.set_item("embedding", arr)?;
+                    if let Some(meta) = vd.data.metadata {
+                        dict.set_item("metadata", value_to_py(py, meta)?)?;
+                    }
+                    dict.set_item("version", vd.version)?;
+                    dict.set_item("timestamp", vd.timestamp)?;
+                    Ok(dict.unbind().into_any())
+                }
+                None => Ok(py.None()),
+            }
         }
     }
 
@@ -502,29 +664,62 @@ impl PyStrata {
     }
 
     /// Search for similar vectors.
+    ///
+    /// Args:
+    ///     collection: The collection name.
+    ///     query: Query vector (numpy array or list of floats).
+    ///     k: Number of nearest neighbors to return.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (collection, query, k, as_of=None))]
     fn vector_search(
         &self,
         py: Python<'_>,
         collection: &str,
         query: &Bound<'_, PyAny>,
         k: u64,
+        as_of: Option<u64>,
     ) -> PyResult<PyObject> {
         let vec = extract_vector(query)?;
-        let matches = self
-            .inner
-            .vector_search(collection, vec, k)
-            .map_err(to_py_err)?;
-        let list = PyList::empty_bound(py);
-        for m in matches {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("key", m.key)?;
-            dict.set_item("score", m.score)?;
-            if let Some(meta) = m.metadata {
-                dict.set_item("metadata", value_to_py(py, meta)?)?;
+        if let Some(ts) = as_of {
+            match self.inner.executor().execute(Command::VectorSearch {
+                branch: None, space: None,
+                collection: collection.to_string(),
+                query: vec, k,
+                filter: None, metric: None,
+                as_of: Some(ts),
+            }).map_err(to_py_err)? {
+                Output::VectorMatches(matches) => {
+                    let list = PyList::empty_bound(py);
+                    for m in matches {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("key", m.key)?;
+                        dict.set_item("score", m.score)?;
+                        if let Some(meta) = m.metadata {
+                            dict.set_item("metadata", value_to_py(py, meta)?)?;
+                        }
+                        list.append(dict)?;
+                    }
+                    Ok(list.unbind().into_any())
+                }
+                _ => Err(PyRuntimeError::new_err("Unexpected output")),
             }
-            list.append(dict)?;
+        } else {
+            let matches = self
+                .inner
+                .vector_search(collection, vec, k)
+                .map_err(to_py_err)?;
+            let list = PyList::empty_bound(py);
+            for m in matches {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("key", m.key)?;
+                dict.set_item("score", m.score)?;
+                if let Some(meta) = m.metadata {
+                    dict.set_item("metadata", value_to_py(py, meta)?)?;
+                }
+                list.append(dict)?;
+            }
+            Ok(list.unbind().into_any())
         }
-        Ok(list.unbind().into_any())
     }
 
     /// Get statistics for a single collection.
@@ -887,8 +1082,12 @@ impl PyStrata {
     }
 
     /// List state cell names with optional prefix filter.
-    #[pyo3(signature = (prefix=None))]
-    fn state_list(&self, prefix: Option<&str>) -> PyResult<Vec<String>> {
+    ///
+    /// Args:
+    ///     prefix: Optional prefix to filter cell names.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (prefix=None, as_of=None))]
+    fn state_list(&self, prefix: Option<&str>, as_of: Option<u64>) -> PyResult<Vec<String>> {
         match self
             .inner
             .executor()
@@ -896,6 +1095,7 @@ impl PyStrata {
                 branch: None,
                 space: None,
                 prefix: prefix.map(|s| s.to_string()),
+                as_of,
             })
             .map_err(to_py_err)?
         {
@@ -958,12 +1158,18 @@ impl PyStrata {
     /// Note: Cursor-based pagination is not yet supported for KV lists.
     /// The underlying executor returns keys without a continuation cursor.
     /// Use `prefix` and `limit` to narrow results.
-    #[pyo3(signature = (prefix=None, limit=None))]
+    ///
+    /// Args:
+    ///     prefix: Optional prefix to filter keys.
+    ///     limit: Optional maximum number of keys to return.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (prefix=None, limit=None, as_of=None))]
     fn kv_list_paginated(
         &self,
         py: Python<'_>,
         prefix: Option<&str>,
         limit: Option<u64>,
+        as_of: Option<u64>,
     ) -> PyResult<PyObject> {
         match self
             .inner
@@ -974,6 +1180,7 @@ impl PyStrata {
                 prefix: prefix.map(|s| s.to_string()),
                 cursor: None,
                 limit,
+                as_of,
             })
             .map_err(to_py_err)?
         {
@@ -989,13 +1196,20 @@ impl PyStrata {
     /// List events by type with pagination support.
     ///
     /// Returns a list of event dicts. Use `after` to paginate from a sequence number.
-    #[pyo3(signature = (event_type, limit=None, after=None))]
+    ///
+    /// Args:
+    ///     event_type: The event type to filter by.
+    ///     limit: Optional maximum number of events to return.
+    ///     after: Optional sequence number to paginate from.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (event_type, limit=None, after=None, as_of=None))]
     fn event_list_paginated(
         &self,
         py: Python<'_>,
         event_type: &str,
         limit: Option<u64>,
         after: Option<u64>,
+        as_of: Option<u64>,
     ) -> PyResult<PyObject> {
         match self
             .inner
@@ -1006,6 +1220,7 @@ impl PyStrata {
                 event_type: event_type.to_string(),
                 limit,
                 after_sequence: after,
+                as_of,
             })
             .map_err(to_py_err)?
         {
@@ -1027,7 +1242,15 @@ impl PyStrata {
     // =========================================================================
 
     /// Search for similar vectors with optional filter and metric override.
-    #[pyo3(signature = (collection, query, k, metric=None, filter=None))]
+    ///
+    /// Args:
+    ///     collection: The collection name.
+    ///     query: Query vector (numpy array or list of floats).
+    ///     k: Number of nearest neighbors to return.
+    ///     metric: Optional distance metric override.
+    ///     filter: Optional metadata filters.
+    ///     as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+    #[pyo3(signature = (collection, query, k, metric=None, filter=None, as_of=None))]
     fn vector_search_filtered(
         &self,
         py: Python<'_>,
@@ -1036,6 +1259,7 @@ impl PyStrata {
         k: u64,
         metric: Option<&str>,
         filter: Option<&Bound<'_, PyList>>,
+        as_of: Option<u64>,
     ) -> PyResult<PyObject> {
         let vec = extract_vector(query)?;
 
@@ -1098,6 +1322,7 @@ impl PyStrata {
                 k,
                 filter: filter_vec,
                 metric: metric_enum,
+                as_of,
             })
             .map_err(to_py_err)?
         {
@@ -1201,6 +1426,34 @@ impl PyStrata {
                 Ok(list.unbind().into_any())
             }
             _ => Err(PyRuntimeError::new_err("Unexpected output for Search")),
+        }
+    }
+
+    // =========================================================================
+    // Time-Travel
+    // =========================================================================
+
+    /// Get the time range of data in the current branch.
+    ///
+    /// Returns a dict with 'oldest_ts' and 'latest_ts' (microseconds since epoch),
+    /// or None values if the branch has no data.
+    fn time_range(&self, py: Python<'_>) -> PyResult<PyObject> {
+        match self.inner.executor().execute(Command::TimeRange {
+            branch: None,
+        }).map_err(to_py_err)? {
+            Output::TimeRange { oldest_ts, latest_ts } => {
+                let dict = PyDict::new_bound(py);
+                match oldest_ts {
+                    Some(ts) => dict.set_item("oldest_ts", ts)?,
+                    None => dict.set_item("oldest_ts", py.None())?,
+                };
+                match latest_ts {
+                    Some(ts) => dict.set_item("latest_ts", ts)?,
+                    None => dict.set_item("latest_ts", py.None())?,
+                };
+                Ok(dict.unbind().into_any())
+            }
+            _ => Err(PyRuntimeError::new_err("Unexpected output for TimeRange")),
         }
     }
 

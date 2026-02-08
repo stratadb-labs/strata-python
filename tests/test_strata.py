@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import time
 
 import pytest
 import numpy as np
@@ -580,3 +581,172 @@ class TestErrors:
         db.vector_create_collection("dim_c", 4)
         with pytest.raises(ConstraintError):
             db.vector_upsert("dim_c", "wrong", [1.0, 2.0])  # wrong dimension
+
+
+def _now_micros():
+    """Return current time in microseconds since epoch."""
+    return int(time.time() * 1_000_000)
+
+
+class TestTimeTravel:
+    """Tests for time-travel query support (as_of parameter)."""
+
+    def test_kv_get_as_of(self, db):
+        """kv_get with as_of returns the value at a past timestamp."""
+        db.kv_put("tt_kv", "v1")
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.kv_put("tt_kv", "v2")
+
+        # Current value is v2
+        assert db.kv_get("tt_kv") == "v2"
+        # At timestamp before v2, should return v1
+        assert db.kv_get("tt_kv", as_of=ts) == "v1"
+
+    def test_kv_get_as_of_before_creation(self, db):
+        """kv_get with as_of before key was created returns None."""
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.kv_put("tt_kv_new", "value")
+        assert db.kv_get("tt_kv_new", as_of=ts) is None
+
+    def test_kv_get_as_of_none_same_as_omit(self, db):
+        """kv_get with as_of=None behaves identically to omitting it."""
+        db.kv_put("tt_kv_none", "hello")
+        assert db.kv_get("tt_kv_none", as_of=None) == db.kv_get("tt_kv_none")
+
+    def test_kv_list_as_of(self, db):
+        db.kv_put("tt_l:a", 1)
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.kv_put("tt_l:b", 2)
+
+        current = db.kv_list("tt_l:")
+        assert len(current) == 2
+        past = db.kv_list("tt_l:", as_of=ts)
+        assert len(past) == 1
+        assert "tt_l:a" in past
+
+    def test_state_get_as_of(self, db):
+        """state_get with as_of returns the value at a past timestamp."""
+        db.state_set("tt_st", "s1")
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.state_set("tt_st", "s2")
+
+        assert db.state_get("tt_st") == "s2"
+        assert db.state_get("tt_st", as_of=ts) == "s1"
+
+    def test_state_list_as_of(self, db):
+        db.state_set("tt_sl:a", 1)
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.state_set("tt_sl:b", 2)
+
+        current = db.state_list("tt_sl:")
+        assert len(current) == 2
+        past = db.state_list("tt_sl:", as_of=ts)
+        assert len(past) == 1
+
+    def test_event_get_as_of(self, db):
+        """event_get with as_of filters by event timestamp."""
+        db.event_append("tt_ev", {"msg": "first"})
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.event_append("tt_ev", {"msg": "second"})
+
+        # Event 0 existed before ts, so it should be visible
+        assert db.event_get(0, as_of=ts) is not None
+        # Event 1 was appended after ts, so it should not be visible
+        assert db.event_get(1, as_of=ts) is None
+
+    def test_event_list_as_of(self, db):
+        """event_list with as_of returns fewer events at earlier timestamp."""
+        db.event_append("tt_el", {"i": 0})
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.event_append("tt_el", {"i": 1})
+        db.event_append("tt_el", {"i": 2})
+
+        current = db.event_list("tt_el")
+        assert len(current) == 3
+        past = db.event_list("tt_el", as_of=ts)
+        assert len(past) == 1
+
+    def test_json_get_as_of(self, db):
+        """json_get with as_of returns the value at a past timestamp."""
+        db.json_set("tt_js", "$", {"v": 1})
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.json_set("tt_js", "$", {"v": 2})
+
+        assert db.json_get("tt_js", "$")["v"] == 2
+        assert db.json_get("tt_js", "$", as_of=ts)["v"] == 1
+
+    def test_json_list_as_of(self, db):
+        db.json_set("tt_jl:a", "$", {"x": 1})
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.json_set("tt_jl:b", "$", {"x": 2})
+
+        current = db.json_list(100, prefix="tt_jl:")
+        assert len(current["keys"]) == 2
+        past = db.json_list(100, prefix="tt_jl:", as_of=ts)
+        assert len(past["keys"]) == 1
+
+    def test_vector_search_as_of(self, db):
+        """vector_search with as_of returns fewer vectors at earlier timestamp."""
+        db.vector_create_collection("tt_vs", 4)
+        db.vector_upsert("tt_vs", "v1", [1.0, 0.0, 0.0, 0.0])
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.vector_upsert("tt_vs", "v2", [0.0, 1.0, 0.0, 0.0])
+
+        current = db.vector_search("tt_vs", [1.0, 0.0, 0.0, 0.0], 10)
+        assert len(current) == 2
+        past = db.vector_search("tt_vs", [1.0, 0.0, 0.0, 0.0], 10, as_of=ts)
+        assert len(past) == 1
+        assert past[0]["key"] == "v1"
+
+    def test_vector_get_as_of(self, db):
+        """vector_get with as_of returns vector data at a past timestamp."""
+        db.vector_create_collection("tt_vg", 4)
+        db.vector_upsert("tt_vg", "vk", [1.0, 0.0, 0.0, 0.0])
+        time.sleep(0.05)
+        ts = _now_micros()
+        time.sleep(0.05)
+        db.vector_delete("tt_vg", "vk")
+
+        # Current: deleted
+        assert db.vector_get("tt_vg", "vk") is None
+        # At past timestamp: should exist
+        result = db.vector_get("tt_vg", "vk", as_of=ts)
+        assert result is not None
+        assert result["key"] == "vk"
+        assert "embedding" in result
+
+    def test_time_range(self, db):
+        """time_range returns valid oldest and latest timestamps."""
+        db.kv_put("tr_key", "value")
+        result = db.time_range()
+        assert "oldest_ts" in result
+        assert "latest_ts" in result
+        assert result["oldest_ts"] is not None
+        assert result["latest_ts"] is not None
+        assert result["oldest_ts"] <= result["latest_ts"]
+
+    def test_time_range_structure(self):
+        """time_range returns a dict with oldest_ts and latest_ts keys."""
+        db = Strata.cache()
+        result = db.time_range()
+        assert "oldest_ts" in result
+        assert "latest_ts" in result
