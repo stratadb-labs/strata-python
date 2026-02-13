@@ -29,6 +29,9 @@ htmlcov/
 *.swo
 *~
 
+# Local dev overrides
+patch.toml
+
 # OS
 .DS_Store
 Thumbs.db
