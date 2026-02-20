@@ -100,6 +100,17 @@ class KVNamespace:
             return self._db.kv_list_paginated(prefix=prefix, limit=limit, as_of=as_of)["keys"]
         return self._db.kv_list(prefix, as_of=as_of)
 
+    def batch_put(self, entries):
+        """Batch put multiple key-value pairs in a single transaction.
+
+        Args:
+            entries: List of dicts with ``"key"`` and ``"value"`` keys.
+
+        Returns:
+            List of dicts with ``"version"`` (on success) or ``"error"`` (on failure).
+        """
+        return self._db.kv_batch_put(entries)
+
 
 class StateNamespace:
     """Namespace for State Cell operations: ``db.state.set()``, ``db.state.get()``, etc."""
@@ -134,6 +145,17 @@ class StateNamespace:
     def history(self, cell):
         return self._db.state_history(cell)
 
+    def batch_set(self, entries):
+        """Batch set multiple state cells in a single transaction.
+
+        Args:
+            entries: List of dicts with ``"cell"`` and ``"value"`` keys.
+
+        Returns:
+            List of dicts with ``"version"`` (on success) or ``"error"`` (on failure).
+        """
+        return self._db.state_batch_set(entries)
+
 
 class EventsNamespace:
     """Namespace for Event Log operations: ``db.events.append()``, ``db.events.list()``, etc."""
@@ -161,6 +183,17 @@ class EventsNamespace:
     def __len__(self):
         return self._db.event_len()
 
+    def batch_append(self, entries):
+        """Batch append multiple events in a single transaction.
+
+        Args:
+            entries: List of dicts with ``"event_type"`` and ``"payload"`` keys.
+
+        Returns:
+            List of dicts with ``"version"`` (on success) or ``"error"`` (on failure).
+        """
+        return self._db.event_batch_append(entries)
+
 
 class JSONNamespace:
     """Namespace for JSON Store operations: ``db.json.set()``, ``db.json.get()``, etc."""
@@ -187,6 +220,17 @@ class JSONNamespace:
 
     def list(self, *, prefix=None, limit=100, cursor=None, as_of=None):
         return self._db.json_list(limit, prefix=prefix, cursor=cursor, as_of=as_of)
+
+    def batch_set(self, entries):
+        """Batch set multiple JSON document paths in a single transaction.
+
+        Args:
+            entries: List of dicts with ``"key"``, ``"path"``, and ``"value"`` keys.
+
+        Returns:
+            List of dicts with ``"version"`` (on success) or ``"error"`` (on failure).
+        """
+        return self._db.json_batch_set(entries)
 
 
 class Collection:
@@ -642,6 +686,35 @@ class Strata:
             enabled: Whether to enable auto-embed.
         """
         self._inner.set_auto_embed(enabled)
+
+    def embed_status(self):
+        """Get a snapshot of the embedding pipeline status.
+
+        Returns a dict with:
+            - ``auto_embed`` (bool): whether auto-embedding is enabled
+            - ``pending`` (int): items waiting in the buffer
+            - ``total_queued`` (int): cumulative items pushed into the pipeline
+            - ``total_embedded`` (int): cumulative items successfully embedded
+            - ``total_failed`` (int): cumulative items that failed embedding
+            - ``scheduler_queue_depth`` (int): tasks waiting in the scheduler
+            - ``scheduler_active_tasks`` (int): tasks currently running
+            - ``is_idle`` (bool): True when no work is pending or in-flight
+            - ``batch_size`` (int): configured embedding batch size
+
+        Derived metrics:
+            - **Progress:** ``total_embedded / total_queued``
+            - **In-flight:** ``total_queued - total_embedded - total_failed``
+
+        Example::
+
+            status = db.embed_status()
+            if status["is_idle"]:
+                print("All embeddings complete")
+            else:
+                pct = status["total_embedded"] / max(status["total_queued"], 1) * 100
+                print(f"Embedding progress: {pct:.1f}%")
+        """
+        return self._inner.embed_status()
 
     def configure_model(self, endpoint, model, api_key=None, timeout_ms=None):
         """Configure an inference model endpoint for intelligent search.

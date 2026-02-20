@@ -183,6 +183,14 @@ class Strata:
         """
         ...
 
+    def kv_batch_put(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Batch put multiple key-value pairs in a single transaction.
+
+        Each entry dict must have ``"key"`` and ``"value"`` keys.
+        Returns a list of ``{"version", "error"}`` dicts (positionally mapped).
+        """
+        ...
+
     def kv_list_paginated(
         self,
         prefix: Optional[str] = None,
@@ -255,6 +263,14 @@ class Strata:
         """Get a state cell value with version info."""
         ...
 
+    def state_batch_set(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Batch set multiple state cells in a single transaction.
+
+        Each entry dict must have ``"cell"`` and ``"value"`` keys.
+        Returns a list of ``{"version", "error"}`` dicts (positionally mapped).
+        """
+        ...
+
     # -- Event Log ------------------------------------------------------------
 
     def event_append(self, event_type: str, payload: Value) -> int:
@@ -297,6 +313,14 @@ class Strata:
             limit: Optional maximum number of events to return.
             after: Optional sequence number to paginate from.
             as_of: Optional timestamp (microseconds since epoch) for time-travel reads.
+        """
+        ...
+
+    def event_batch_append(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Batch append multiple events in a single transaction.
+
+        Each entry dict must have ``"event_type"`` and ``"payload"`` keys.
+        Returns a list of ``{"version", "error"}`` dicts (positionally mapped).
         """
         ...
 
@@ -346,6 +370,14 @@ class Strata:
 
     def json_get_versioned(self, key: str) -> dict[str, Any] | None:
         """Get a JSON document value with version info."""
+        ...
+
+    def json_batch_set(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Batch set multiple JSON document paths in a single transaction.
+
+        Each entry dict must have ``"key"``, ``"path"``, and ``"value"`` keys.
+        Returns a list of ``{"version", "error"}`` dicts (positionally mapped).
+        """
         ...
 
     # -- Vector Store ---------------------------------------------------------

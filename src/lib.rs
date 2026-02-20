@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ::stratadb::{
-    AccessMode, BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
+    AccessMode, BatchEventEntry, BatchItemResult, BatchJsonEntry, BatchKvEntry, BatchStateEntry,
+    BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
     CollectionInfo, Command, DistanceMetric, Error as StrataError, FilterOp, MergeStrategy,
     MetadataFilter, OpenOptions, Output, SearchQuery, Session, Strata as RustStrata,
     TimeRangeInput, Value, VersionedBranchInfo, VersionedValue,
@@ -773,6 +774,187 @@ impl PyStrata {
     }
 
     // =========================================================================
+    // Batch Operations
+    // =========================================================================
+
+    /// Batch put multiple key-value pairs in a single transaction.
+    ///
+    /// Each entry should be a dict with 'key' and 'value'.
+    /// Returns a list of dicts with 'version' (on success) or 'error' (on failure).
+    fn kv_batch_put(
+        &self,
+        py: Python<'_>,
+        entries: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        let batch: Vec<BatchKvEntry> = entries
+            .iter()
+            .map(|item| {
+                let dict = item.downcast::<PyDict>()?;
+                let key: String = dict
+                    .get_item("key")?
+                    .ok_or_else(|| ValidationError::new_err("missing 'key'"))?
+                    .extract()?;
+                let value = py_to_value(
+                    &dict
+                        .get_item("value")?
+                        .ok_or_else(|| ValidationError::new_err("missing 'value'"))?,
+                )?;
+                Ok(BatchKvEntry { key, value })
+            })
+            .collect::<PyResult<_>>()?;
+
+        match self
+            .inner
+            .executor()
+            .execute(Command::KvBatchPut {
+                branch: None,
+                space: None,
+                entries: batch,
+            })
+            .map_err(to_py_err)?
+        {
+            Output::BatchResults(results) => batch_results_to_py(py, results),
+            _ => Err(PyRuntimeError::new_err("Unexpected output for KvBatchPut")),
+        }
+    }
+
+    /// Batch append multiple events in a single transaction.
+    ///
+    /// Each entry should be a dict with 'event_type' and 'payload'.
+    /// Returns a list of dicts with 'version' (on success) or 'error' (on failure).
+    fn event_batch_append(
+        &self,
+        py: Python<'_>,
+        entries: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        let batch: Vec<BatchEventEntry> = entries
+            .iter()
+            .map(|item| {
+                let dict = item.downcast::<PyDict>()?;
+                let event_type: String = dict
+                    .get_item("event_type")?
+                    .ok_or_else(|| ValidationError::new_err("missing 'event_type'"))?
+                    .extract()?;
+                let payload = py_to_value(
+                    &dict
+                        .get_item("payload")?
+                        .ok_or_else(|| ValidationError::new_err("missing 'payload'"))?,
+                )?;
+                Ok(BatchEventEntry {
+                    event_type,
+                    payload,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+
+        match self
+            .inner
+            .executor()
+            .execute(Command::EventBatchAppend {
+                branch: None,
+                space: None,
+                entries: batch,
+            })
+            .map_err(to_py_err)?
+        {
+            Output::BatchResults(results) => batch_results_to_py(py, results),
+            _ => Err(PyRuntimeError::new_err(
+                "Unexpected output for EventBatchAppend",
+            )),
+        }
+    }
+
+    /// Batch set multiple state cells in a single transaction.
+    ///
+    /// Each entry should be a dict with 'cell' and 'value'.
+    /// Returns a list of dicts with 'version' (on success) or 'error' (on failure).
+    fn state_batch_set(
+        &self,
+        py: Python<'_>,
+        entries: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        let batch: Vec<BatchStateEntry> = entries
+            .iter()
+            .map(|item| {
+                let dict = item.downcast::<PyDict>()?;
+                let cell: String = dict
+                    .get_item("cell")?
+                    .ok_or_else(|| ValidationError::new_err("missing 'cell'"))?
+                    .extract()?;
+                let value = py_to_value(
+                    &dict
+                        .get_item("value")?
+                        .ok_or_else(|| ValidationError::new_err("missing 'value'"))?,
+                )?;
+                Ok(BatchStateEntry { cell, value })
+            })
+            .collect::<PyResult<_>>()?;
+
+        match self
+            .inner
+            .executor()
+            .execute(Command::StateBatchSet {
+                branch: None,
+                space: None,
+                entries: batch,
+            })
+            .map_err(to_py_err)?
+        {
+            Output::BatchResults(results) => batch_results_to_py(py, results),
+            _ => Err(PyRuntimeError::new_err(
+                "Unexpected output for StateBatchSet",
+            )),
+        }
+    }
+
+    /// Batch set multiple JSON document paths in a single transaction.
+    ///
+    /// Each entry should be a dict with 'key', 'path', and 'value'.
+    /// Returns a list of dicts with 'version' (on success) or 'error' (on failure).
+    fn json_batch_set(
+        &self,
+        py: Python<'_>,
+        entries: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        let batch: Vec<BatchJsonEntry> = entries
+            .iter()
+            .map(|item| {
+                let dict = item.downcast::<PyDict>()?;
+                let key: String = dict
+                    .get_item("key")?
+                    .ok_or_else(|| ValidationError::new_err("missing 'key'"))?
+                    .extract()?;
+                let path: String = dict
+                    .get_item("path")?
+                    .ok_or_else(|| ValidationError::new_err("missing 'path'"))?
+                    .extract()?;
+                let value = py_to_value(
+                    &dict
+                        .get_item("value")?
+                        .ok_or_else(|| ValidationError::new_err("missing 'value'"))?,
+                )?;
+                Ok(BatchJsonEntry { key, path, value })
+            })
+            .collect::<PyResult<_>>()?;
+
+        match self
+            .inner
+            .executor()
+            .execute(Command::JsonBatchSet {
+                branch: None,
+                space: None,
+                entries: batch,
+            })
+            .map_err(to_py_err)?
+        {
+            Output::BatchResults(results) => batch_results_to_py(py, results),
+            _ => Err(PyRuntimeError::new_err(
+                "Unexpected output for JsonBatchSet",
+            )),
+        }
+    }
+
+    // =========================================================================
     // Branch Management
     // =========================================================================
 
@@ -1445,6 +1627,32 @@ impl PyStrata {
         self.inner.set_auto_embed(enabled).map_err(to_py_err)
     }
 
+    /// Get a snapshot of the embedding pipeline status.
+    ///
+    /// Returns a dict with:
+    ///   - auto_embed (bool): whether auto-embedding is enabled
+    ///   - pending (int): items waiting in the buffer
+    ///   - total_queued (int): cumulative items pushed
+    ///   - total_embedded (int): cumulative items successfully embedded
+    ///   - total_failed (int): cumulative items that failed
+    ///   - is_idle (bool): True when no work is pending or in-flight
+    fn embed_status(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let info = self.inner.embed_status().map_err(to_py_err)?;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("auto_embed", info.auto_embed)?;
+        dict.set_item("batch_size", info.batch_size)?;
+        dict.set_item("pending", info.pending)?;
+        dict.set_item("total_queued", info.total_queued)?;
+        dict.set_item("total_embedded", info.total_embedded)?;
+        dict.set_item("total_failed", info.total_failed)?;
+        dict.set_item("scheduler_queue_depth", info.scheduler_queue_depth)?;
+        dict.set_item("scheduler_active_tasks", info.scheduler_active_tasks)?;
+        dict.set_item("is_idle", info.pending == 0
+            && info.scheduler_active_tasks == 0
+            && info.scheduler_queue_depth == 0)?;
+        Ok(dict.unbind().into_any())
+    }
+
     /// Configure an inference model endpoint for intelligent search.
     ///
     /// When a model is configured, `search()` transparently expands queries
@@ -1607,6 +1815,24 @@ fn extract_vector(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     Err(ValidationError::new_err(
         "Expected numpy array or list of floats",
     ))
+}
+
+/// Convert batch results to a Python list of dicts.
+fn batch_results_to_py(py: Python<'_>, results: Vec<BatchItemResult>) -> PyResult<PyObject> {
+    let list = PyList::empty_bound(py);
+    for r in results {
+        let dict = PyDict::new_bound(py);
+        match r.version {
+            Some(v) => dict.set_item("version", v)?,
+            None => dict.set_item("version", py.None())?,
+        };
+        match r.error {
+            Some(e) => dict.set_item("error", e)?,
+            None => dict.set_item("error", py.None())?,
+        };
+        list.append(dict)?;
+    }
+    Ok(list.unbind().into_any())
 }
 
 /// Convert CollectionInfo to Python dict.

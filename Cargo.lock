@@ -134,6 +134,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -165,6 +190,12 @@ dependencies = [
  "block-buffer",
  "crypto-common",
 ]
+
+[[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "equivalent"
@@ -410,6 +441,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +681,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
+name = "rayon"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,7 +907,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "strata-concurrency"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "chrono",
  "dashmap",
@@ -864,7 +924,7 @@ dependencies = [
 [[package]]
 name = "strata-core"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "bincode",
  "chrono",
@@ -877,7 +937,7 @@ dependencies = [
 [[package]]
 name = "strata-durability"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "crc32fast",
  "parking_lot",
@@ -896,14 +956,16 @@ dependencies = [
 [[package]]
 name = "strata-engine"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
  "dashmap",
  "fs2",
+ "memmap2",
  "once_cell",
  "parking_lot",
+ "rayon",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -921,7 +983,7 @@ dependencies = [
 [[package]]
 name = "strata-executor"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "base64 0.21.7",
  "chrono",
@@ -940,7 +1002,7 @@ dependencies = [
 [[package]]
 name = "strata-intelligence"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "dashmap",
  "once_cell",
@@ -957,7 +1019,7 @@ dependencies = [
 [[package]]
 name = "strata-security"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "serde",
 ]
@@ -965,7 +1027,7 @@ dependencies = [
 [[package]]
 name = "strata-storage"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "dashmap",
  "rustc-hash",
@@ -976,7 +1038,7 @@ dependencies = [
 [[package]]
 name = "stratadb"
 version = "0.5.1"
-source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#ccddaf828040aa91660d678a3b9925548fe9dcb7"
+source = "git+https://github.com/strata-ai-labs/strata-core?branch=main#8b683e5774d5b2f330c6f6c2a4e0fe8a22f393fa"
 dependencies = [
  "serde_json",
  "strata-executor",
